@@ -34,6 +34,7 @@ import {
 import { syncJournalDirectory, withJournalDescriptorSync, writeFullySync } from "./journal-io.js";
 import { removeSessionFile } from "./session-file-removal.js";
 import {
+	sessionJournalErrorText as errorText,
 	SESSION_JOURNAL_CHUNK_BYTES,
 	SESSION_JOURNAL_MAX_FRAME_BYTES,
 	SESSION_JOURNAL_MAX_IPC_BYTES,
@@ -57,10 +58,6 @@ interface Upload {
 	received: number;
 	retention?: JournalFrameRetention;
 	qualification?: NativeEntryQualification;
-}
-
-function errorText(error: unknown): string {
-	return (error instanceof Error ? error.message : String(error)).slice(0, 8192);
 }
 
 function canonicalJournal(path: string): string {
@@ -171,11 +168,11 @@ async function start(): Promise<void> {
 		}
 	};
 	startupRelease = release;
-	const requireFileIdentity = (current: Pick<Stats, "dev" | "ino">) => {
+	const requireFileIdentity = (current: Pick<Stats, "dev" | "ino">, operation: "stat" | "fstat") => {
 		if (fileIdentity && (current.dev !== fileIdentity.dev || current.ino !== fileIdentity.ino)) {
 			poisoned = true;
 			throw new Error(
-				`Session journal file identity changed outside its owner: ${JSON.stringify(journalPath)}; ` +
+				`Session journal file identity changed outside its owner: ${JSON.stringify(journalPath)}; operation=${operation}; ` +
 					`expected dev=${fileIdentity.dev}, ino=${fileIdentity.ino}; observed dev=${current.dev}, ino=${current.ino}. ` +
 					"Stop the owning runtime and inspect the journal before reopening it to reacquire ownership. " +
 					"For CLI sessions, base-context shutdown stops all workers; then use base-context --resume <path>. " +
@@ -187,7 +184,7 @@ async function start(): Promise<void> {
 	const requireStable = () => {
 		assertOwner();
 		const current = statSync(journalPath);
-		requireFileIdentity(current);
+		requireFileIdentity(current, "stat");
 		if (current.size !== state.size) {
 			poisoned = true;
 			throw new Error("Session journal changed outside its owner; recovery is required");
@@ -208,7 +205,7 @@ async function start(): Promise<void> {
 		assertOwner();
 		return withDescriptor(openSync(journalPath, "r"), async (fd) => {
 			const current = fstatSync(fd);
-			requireFileIdentity(current);
+			requireFileIdentity(current, "fstat");
 			const size = current.size;
 			let position = 0;
 			let keep = 0;
@@ -277,7 +274,7 @@ async function start(): Promise<void> {
 				}
 			}
 			assertOwner();
-			requireFileIdentity(statSync(journalPath));
+			requireFileIdentity(statSync(journalPath), "stat");
 			if (fstatSync(fd).size !== size) throw new Error("Session journal changed while reading");
 			if (format === undefined && size > 0) {
 				const prefix = parts[0]?.toString("utf8").trimStart() ?? "";
@@ -317,13 +314,13 @@ async function start(): Promise<void> {
 		try {
 			withJournalDescriptorSync(openSync(journalPath, constants.O_RDWR | constants.O_APPEND), (fd) => {
 				const current = fstatSync(fd);
-				requireFileIdentity(current);
+				requireFileIdentity(current, "fstat");
 				if (current.size !== state.size) throw new Error("Session journal changed before append");
 				writeText(fd, encoded.line);
 				fsyncSync(fd);
 			});
 			assertOwner();
-			requireFileIdentity(statSync(journalPath));
+			requireFileIdentity(statSync(journalPath), "stat");
 		} catch (error) {
 			poisoned = true;
 			throw error;
@@ -350,14 +347,14 @@ async function start(): Promise<void> {
 			withJournalDescriptorSync(openSync(journalPath, "r+"), (fd) => {
 				assertOwner();
 				const current = fstatSync(fd);
-				requireFileIdentity(current);
+				requireFileIdentity(current, "fstat");
 				if (current.size !== recovered.size) throw new Error("Session journal changed before recovery");
 				if (recovered.keep !== recovered.size) ftruncateSync(fd, recovered.keep);
 				fsyncSync(fd);
 			});
 			syncJournalDirectory(dirname(journalPath));
 			assertOwner();
-			requireFileIdentity(statSync(journalPath));
+			requireFileIdentity(statSync(journalPath), "stat");
 		} catch (error) {
 			poisoned = true;
 			throw error;
@@ -413,7 +410,7 @@ async function start(): Promise<void> {
 			fileIdentity = identity;
 			syncJournalDirectory(dirname(journalPath));
 			assertOwner();
-			requireFileIdentity(statSync(journalPath));
+			requireFileIdentity(statSync(journalPath), "stat");
 			state = { format: "framed", cursor: next, nextSequence: next.sequence, keep: bytes, size: bytes };
 			poisoned = false;
 		} catch (error) {
@@ -578,7 +575,7 @@ async function start(): Promise<void> {
 					if (poisoned) throw new Error("Session journal requires owner recovery");
 					requireStable();
 					withJournalDescriptorSync(openSync(journalPath, "r+"), (fd) => {
-						requireFileIdentity(fstatSync(fd));
+						requireFileIdentity(fstatSync(fd), "fstat");
 						fsyncSync(fd);
 					});
 					return;

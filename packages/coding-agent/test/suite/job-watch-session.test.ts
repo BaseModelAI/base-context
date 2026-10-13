@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.js";
 import { JOB_WATCH_STATE, type JobWatchController } from "../../src/core/job-watch.js";
 import type { HostRequestHandlers } from "../../src/core/kernel/index.js";
+import type { CustomMessage } from "../../src/core/messages.js";
 import { SessionManager } from "../../src/core/session-manager.js";
+import { waitForHeadlessCompletion } from "../../src/modes/headless-completion.js";
 import { createHarness, getAssistantTexts, type Harness } from "./harness.js";
 
 const harnesses: Harness[] = [];
@@ -99,6 +101,66 @@ function eventCount(harness: Harness) {
 }
 
 describe("job-watch real AgentSession autonomous compatibility", () => {
+	it("delivers completion parked after observation through an admission pause before headless completion", async () => {
+		const harness = await createHarness({ tools: [], autonomous: { enabled: false } });
+		harnesses.push(harness);
+		const { session } = harness;
+		const handlers: HostRequestHandlers = Reflect.get(session, "_createKernelHostHandlers").call(session);
+		const watch = await handlers["job_watch.watch"]({
+			resource_id: "completed-handle",
+			job_id: "completed-job",
+			completion_source: "handle",
+		});
+		await handlers["job_watch.observation"]({
+			id: watch.id,
+			generation: watch.generation,
+			result: {
+				source: "handle",
+				observation: {
+					observed_at: new Date().toISOString(),
+					job_id: "completed-job",
+					state: "succeeded",
+					progress: { exit_code: 0 },
+					attention: [],
+					evidence: ["completed-job.json"],
+				},
+			},
+		});
+		const controller = Reflect.get(session, "_jobWatchController") as JobWatchController;
+		const original = controller.snapshot().watches[0].pending[0];
+		const consume = vi.spyOn(controller, "consume");
+		expect(original).toMatchObject({ wake: false, routine: false });
+		expect(session.queuedActionCount).toBe(0);
+		harness.setResponses([fauxAssistantMessage("Completed job evidence reported.")]);
+		const pause = session.acquireSessionInputPause();
+		let completion: ReturnType<typeof waitForHeadlessCompletion>;
+		try {
+			await handlers["job_watch.park"]({ ids: [watch.id] });
+			expect(controller.isParked()).toBe(true);
+			expect(controller.snapshot().watches[0].pending).toEqual([
+				expect.objectContaining({ id: original.id, text: original.text }),
+			]);
+			expect(session.queuedActionCount).toBe(0);
+			completion = waitForHeadlessCompletion(session, { waitForRlmQuiescence: true });
+		} finally {
+			pause.release();
+		}
+		await completion;
+		const events = session.messages.filter(
+			(message): message is CustomMessage => message.role === "custom" && message.customType === "job_watch_event",
+		);
+		expect(events).toHaveLength(1);
+		expect(events[0].content).toBe(`[job-watch] ${original.text}`);
+		expect(controller.status(String(watch.id))).toMatchObject({ pending_events: 0, last_admitted: original.id });
+		expect(controller.isParked()).toBe(false);
+		expect(consume).not.toHaveBeenCalled();
+		expect(getAssistantTexts(harness)).toContain("Completed job evidence reported.");
+		await controller.flushPending();
+		await session.waitForIdle();
+		expect(eventCount(harness)).toBe(1);
+		expect(harness.faux.state.callCount).toBe(1);
+	});
+
 	it("keeps progress out of model turns and delivers awaited terminal evidence at the next tool boundary", async () => {
 		let release!: () => void;
 		let started!: () => void;

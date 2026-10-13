@@ -70,6 +70,8 @@ export interface BuildSystemPromptOptions {
 	cwd: string;
 	/** Conversation log path. */
 	messagesPath?: string;
+	/** Foreground wait for admitted IPython cells; default: 1000 ms. */
+	foregroundWaitMs?: number;
 	/** Pre-loaded context files. */
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-loaded skills. */
@@ -178,6 +180,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	let prompt = buildRlmPrompt({
 		cwd: promptCwd,
 		messagesPath: promptMessagesPath,
+		foregroundWaitMs: options.foregroundWaitMs,
 		installedSkills: visiblePythonSkillImportNames,
 		activeTools: tools.filter((name) => name === "ipython" || name === "bash" || name === "edit"),
 		allowRecursion,

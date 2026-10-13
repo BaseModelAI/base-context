@@ -33,6 +33,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       error: ${JSON.stringify(promptError)} }) + "\n");
     return;
   }
+  if (command.type === "abort") {
+    process.stdout.write(JSON.stringify({ type: "response", id: command.id, command: command.type,
+      success: !${JSON.stringify(promptError)}, error: ${JSON.stringify(promptError)} }) + "\n");
+    return;
+  }
   if (command.type !== "get_state") throw new Error("Unexpected work before startup checks");
   if (++stateRequests === ${JSON.stringify(exitOnState)}) {
     process.stderr.write("mock RPC exit\n", () => process.exit(7));
@@ -75,6 +80,21 @@ afterEach(() => {
 });
 
 describe("RpcClient completion", () => {
+	it.each([undefined, "Daemon is preparing an update restart"])(
+		"settles a void command from its response (error=%s)",
+		async (failure) => {
+			const server = startup(DAEMON_SCHEMA_REVISION, failure);
+			try {
+				await server.client.start();
+				if (failure) await expect(server.client.abort()).rejects.toThrow(failure);
+				else await expect(server.client.abort()).resolves.toBeUndefined();
+				expect(await server.client.getState()).toMatchObject({ schemaRevision: DAEMON_SCHEMA_REVISION });
+			} finally {
+				await server.client.stop();
+			}
+		},
+	);
+
 	it.each([1, 2])(
 		"rejects pending state request %i when the child exits",
 		async (exitOnState) => {

@@ -5,6 +5,13 @@ import { join } from "node:path";
 
 export const RETAINED_OUTPUT_FIELD = "/message/content/0/text";
 export const TOOL_OUTPUT_PREVIEW_BYTES = 8 * 1024;
+export const ROUTINE_TOOL_OUTPUT_PREVIEW_BYTES = 4 * 1024;
+
+export function getToolOutputPreviewBytes(result: { status: string; stderr: string; error?: unknown }): number {
+	return result.status === "ok" && !result.stderr && !result.error
+		? ROUTINE_TOOL_OUTPUT_PREVIEW_BYTES
+		: TOOL_OUTPUT_PREVIEW_BYTES;
+}
 export const PUBLIC_TEXT_WINDOW_BYTES = 64 * 1024;
 
 export interface RetainedToolOutput {
@@ -106,7 +113,7 @@ export class ToolOutputCapture {
 		}
 	}
 
-	finish(captureComplete: boolean): RetainedToolOutput | undefined {
+	finish(captureComplete: boolean, previewBytes = TOOL_OUTPUT_PREVIEW_BYTES): RetainedToolOutput | undefined {
 		if (this.fd === undefined) return undefined;
 		try {
 			closeSync(this.fd);
@@ -116,7 +123,7 @@ export class ToolOutputCapture {
 			this.fd = undefined;
 		}
 		this.descriptor.captureComplete = captureComplete && !this.descriptor.captureError;
-		if (this.descriptor.captureComplete && this.descriptor.byteLength <= TOOL_OUTPUT_PREVIEW_BYTES - 2048) {
+		if (this.descriptor.captureComplete && this.descriptor.byteLength <= previewBytes - 2048) {
 			try {
 				unlinkSync(this.path);
 			} catch {

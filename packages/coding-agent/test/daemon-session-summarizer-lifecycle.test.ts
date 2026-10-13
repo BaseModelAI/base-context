@@ -1,6 +1,9 @@
 import { type AssistantMessage, getModel } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import type { InferenceCoordinator } from "../src/core/inference-coordinator.js";
+import type { StatusSummariesPolicy } from "../src/core/settings-manager.js";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
+import { activeActivityForSession } from "../src/modes/daemon/daemon-session-list.js";
 import {
 	buildStatusContext,
 	DaemonSessionSummarizer,
@@ -35,7 +38,13 @@ function assistantMessage(
 }
 
 function makeState(
-	opts: { working?: boolean; messages?: number; kind?: "top-level" | "subagent"; persisted?: unknown } = {},
+	opts: {
+		working?: boolean;
+		messages?: number;
+		kind?: "top-level" | "subagent";
+		persisted?: unknown;
+		policy?: StatusSummariesPolicy;
+	} = {},
 ): ActiveSessionState {
 	const appended: unknown[] = [];
 	const state = {
@@ -52,6 +61,7 @@ function makeState(
 				state: { streamingMessage: undefined },
 				model: getModel("openai", "gpt-4o-mini"),
 				modelRegistry: {},
+				settingsManager: { getStatusSummaries: () => opts.policy ?? "always" },
 				sessionManager: {
 					getSessionId: () => "session-1",
 					getSessionFile: () => undefined,
@@ -536,6 +546,86 @@ describe("DaemonSessionSummarizer lifecycle", () => {
 		else await summarizer.forget(state.activeSessionId);
 		await vi.advanceTimersByTimeAsync(REFRESH_MS);
 		expect(generate).toHaveBeenCalledOnce();
+		await summarizer.stop();
+	});
+
+	test.each(["observed", "off"] as const)(
+		"%s gates inference but retains local activity and errors",
+		async (policy) => {
+			vi.useFakeTimers();
+			const state = makeState({ policy });
+			const generate = vi.fn().mockResolvedValue({ summary: "Finished the task", taskState: "completed" });
+			const getRequests = vi.fn();
+			const summarizer = new DaemonSessionSummarizer(() => [state], undefined, generate, getRequests);
+			expect(activeActivityForSession(state)).toBe("idle");
+			summarizer.notifyActivity(state);
+			await vi.advanceTimersByTimeAsync(SETTLE_MS);
+			expect(state.summaryState).toMatchObject({ taskState: "needs_input", basedOnMessageCount: 2 });
+			Object.assign(state.runtime.session, { isSessionActive: true });
+			expect(activeActivityForSession(state)).toBe("working");
+			Object.assign(state.runtime.session, { isSessionActive: false });
+			state.runtime.session.messages.push(
+				assistantMessage({ content: [], stopReason: "error", errorMessage: "Invalid request" }),
+			);
+			summarizer.notifyActivity(state);
+			await vi.advanceTimersByTimeAsync(SETTLE_MS);
+			expect(state.summaryState).toMatchObject({
+				summary: "Model request failed: Invalid request",
+				taskState: "needs_input",
+				basedOnMessageCount: 3,
+			});
+			expect(generate).not.toHaveBeenCalled();
+			expect(getRequests).not.toHaveBeenCalled();
+			state.runtime.session.messages.push(
+				assistantMessage({ content: [{ type: "text", text: "Finished" }], stopReason: "stop" }),
+			);
+			summarizer.setObserved(true);
+			summarizer.notifyActivity(state);
+			await vi.advanceTimersByTimeAsync(SETTLE_MS);
+			expect(generate).toHaveBeenCalledTimes(policy === "observed" ? 1 : 0);
+			await summarizer.stop();
+		},
+	);
+
+	test("detaching cancels generated work and reattachment refreshes after physical settlement without the old interval", async () => {
+		vi.useFakeTimers();
+		const state = makeState({ policy: "observed" });
+		let finish!: () => void;
+		const pending = new Promise<void>((resolve) => {
+			finish = resolve;
+		});
+		let signal: AbortSignal | undefined;
+		const generate = vi
+			.fn()
+			.mockImplementationOnce(async (params: GenerateAgentStatusParams) => {
+				signal = params.signal;
+				await pending;
+				return { summary: "Stale detached result", taskState: "completed" };
+			})
+			.mockResolvedValue({ summary: "Current result", taskState: "completed" });
+		const dispose = vi.fn().mockResolvedValue(undefined);
+		const requests = { dispose } as unknown as InferenceCoordinator;
+		const getRequests = vi.fn(() => requests);
+		const summarizer = new DaemonSessionSummarizer(() => [state], undefined, generate, getRequests);
+		summarizer.setObserved(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(generate).toHaveBeenCalledOnce();
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		summarizer.setObserved(false);
+		expect(signal?.aborted).toBe(true);
+		expect(vi.getTimerCount()).toBe(0);
+		summarizer.setObserved(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(generate).toHaveBeenCalledOnce();
+		finish();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(state.summaryState).toBeUndefined();
+		expect(dispose).toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(generate).toHaveBeenCalledTimes(2);
+		expect(getRequests).toHaveBeenCalledTimes(2);
+		expect(state.summaryState).toMatchObject({ summary: "Current result", taskState: "completed" });
 		await summarizer.stop();
 	});
 

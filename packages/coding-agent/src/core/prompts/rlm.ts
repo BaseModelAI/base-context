@@ -1,3 +1,4 @@
+import { resolveForegroundWaitMs } from "../ipython-settings.js";
 import { DEFAULT_RLM_EXTRA_IMPORT_LABELS } from "../kernel/bootstrap.js";
 
 export interface RlmPromptOptions {
@@ -5,6 +6,7 @@ export interface RlmPromptOptions {
 	skillsDir?: string;
 	installedSkills?: string[];
 	messagesPath: string;
+	foregroundWaitMs?: number;
 	allowRecursion?: boolean;
 	depth?: number;
 	parentAgent?: string;
@@ -32,11 +34,13 @@ const SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT = [
 	"Treat this as clarity guidance, not a claim of formal ASD-STE100 compliance. Preserve a user-requested format, tone, terminology, and necessary precision.",
 ].join("\n");
 
-function buildReplControlPrompt(hasBoundedInspect: boolean): string {
+function buildReplControlPrompt(hasBoundedInspect: boolean, foregroundWaitMs: number): string {
+	const waitSeconds = foregroundWaitMs / 1000;
+	const waitDuration = `${waitSeconds} ${waitSeconds === 1 ? "second" : "seconds"}`;
 	return [
 		"The `ipython` tool is a persistent Python REPL — the agent's long-lived control environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Top-level `await` works directly. Use it to keep intermediate variables, inspect and transform outputs, and write small helper functions. Compaction removes individual variables whose serialized form exceeds 16 MiB; keep large source data on disk and reload it when needed.",
 		"",
-		"Fast `ipython` cells return their normal result. An admitted cell still running after 1 second returns a pending execution ID without being cancelled. Pending is not paused: the cell keeps running and can change variables and files.",
+		`Fast \`ipython\` cells return their normal result. An admitted cell still running after ${waitDuration} returns a pending execution ID without being cancelled. Pending is not paused: the cell keeps running and can change variables and files.`,
 		'Call `ipython` with `{"action":"status","execution_id":"<id>"}` to inspect or collect the result, or `{"action":"interrupt","execution_id":"<id>"}` to request interruption. These are tool arguments, not Python code; they work while the kernel is busy.',
 		"Only one cell can be outstanding. New code is rejected until the cell finishes and its result is collected with `status`. Completion sends a follow-up with the execution ID; result ready means collect it, not that another cell has started. End the turn when waiting for that follow-up.",
 		"Interruption requests cancellation and unwinding, not a resumable pause or rollback. It does not guarantee cleanup of arbitrary subprocess groups. An interrupt request is not confirmation that execution has finished; use `status` to collect the terminal result.",
@@ -113,7 +117,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		"",
 		`Recursive agent depth: ${depth}`,
 		`Pre-installed Python packages: ${DEFAULT_RLM_EXTRA_IMPORT_LABELS.join(", ")}.`,
-		"Install additional packages with `uv pip install <pkg>` (this is a uv-managed venv with no pip module).",
+		"For extra packages needed by the REPL, get its interpreter from `sys.executable` and run `uv pip install --python <interpreter-path> <pkg>` with that path shell-quoted. This targets the REPL's uv-managed venv even outside its directory; it has no pip module. Use the project's own environment for project dependencies.",
 	];
 
 	const childDoctrine = buildChildAgentDoctrine(options);
@@ -188,7 +192,13 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 	}
 
 	if (hasIpython) {
-		parts.push("", buildReplControlPrompt(installedSkills.includes("bounded_inspect")));
+		parts.push(
+			"",
+			buildReplControlPrompt(
+				installedSkills.includes("bounded_inspect"),
+				resolveForegroundWaitMs(options.foregroundWaitMs),
+			),
+		);
 		if (installedSkills.includes("refine")) {
 			parts.push(
 				"",

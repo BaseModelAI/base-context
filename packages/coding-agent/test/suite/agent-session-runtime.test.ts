@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Model, RequestTokenBudgetOptions } from "@ponythewhite/base-context-ai";
-import { fauxAssistantMessage, RequestTokenBudgetError, registerFauxProvider } from "@ponythewhite/base-context-ai";
+import { fauxAssistantMessage, registerFauxProvider } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.js";
 import type { AgentSessionRuntimeConfig } from "../../src/core/agent-session-config.js";
@@ -542,7 +542,10 @@ describe("AgentSessionRuntime characterization", () => {
 
 		const { runtime: unknownStart } = await createRuntimeForTest(() => {});
 		await unknownStart.session.setRlmMaxSubagents(1);
-		vi.spyOn(unknownStart, "createRlmSubagentRuntime").mockRejectedValueOnce(new Error("start outcome unavailable"));
+		vi.spyOn(unknownStart, "createRlmSubagentRuntime").mockImplementationOnce(async (options) => {
+			options.admission?.claimFactory();
+			throw new Error("start outcome unavailable");
+		});
 		await unknownStart.session.runRlmChild("unknown factory outcome", { name: "unknown-child" });
 		await vi.waitFor(() => expect(unknownStart.session.hasRunningRlmChildren()).toBe(false));
 		await expect(unknownStart.session.runRlmChild("unknown is not disposed")).rejects.toThrow("resident child limit");
@@ -623,7 +626,7 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(inlineChild.messages.some((message) => message.role === "assistant")).toBe(true);
 	});
 
-	it("keeps semantic spawn lineage through the production runtime factory", async () => {
+	it("keeps semantic spawn lineage and inherited policy through production creation and hydration", async () => {
 		const tempDir = join(tmpdir(), `pi-runtime-factory-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		cleanups.push(() => rmSync(tempDir, { recursive: true, force: true }));
@@ -891,16 +894,19 @@ describe("AgentSessionRuntime characterization", () => {
 		);
 
 		const enforcingChild = await internals.createRuntime({ type: "create", sessionPath: firstFile });
-		// Actual native preparation after genuine passive hydration must enforce the inherited unknown policy.
-		// No inferred child profile and no transport: the offline endpoint is guarded even if propagation regresses.
+		// Hydration preserves the policy, but incompatible faux-history replay is refused before budget assessment.
+		// This checks configuration inheritance and replay validation, not an executed budget refusal.
 		expect(enforcingChild.runtime.session.requests.getRequestTokenBudgetOptions()).toEqual(requestTokenBudget);
 		const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected offline native fetch"));
 		cleanups.push(() => fetch.mockRestore());
 		enforcingChild.runtime.services.authStorage.setRuntimeApiKey(nativeModel.provider, "offline-fixture");
 		await enforcingChild.runtime.session.setModel(nativeModel);
-		const refused = enforcingChild.runtime.session.prompt("unprofiled native child must refuse before transport");
-		await expect(refused).rejects.toBeInstanceOf(RequestTokenBudgetError);
-		await expect(refused).rejects.toMatchObject({ assessment: { status: "unknown" } });
+		const refused = enforcingChild.runtime.session.prompt(
+			"native child must refuse incompatible replay before transport",
+		);
+		await expect(refused).rejects.toThrow(
+			new Error("Committed context epoch requires a compatible final provider projection"),
+		);
 		expect(fetch).not.toHaveBeenCalled();
 	});
 

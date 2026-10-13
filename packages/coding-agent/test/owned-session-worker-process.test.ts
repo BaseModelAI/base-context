@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { readActiveOrphanProcesses } from "../src/core/orphan-process-journal.js";
 
 const fixturePath = resolve(__dirname, "fixtures/owned-session-worker-fixture.ts");
@@ -254,6 +254,141 @@ describe("owned session worker processes", () => {
 		await waitForProcessGone(replacementPid);
 	});
 
+	it.each([false, true])(
+		"distinguishes buffered and attempted RPC commands after stdin failure (EOF: %s)",
+		async (eof) => {
+			const root = mkdtempSync(join(tmpdir(), "prime-owned-worker-input-"));
+			tempDirs.push(root);
+			const pidPath = join(root, "worker.pid");
+			const frontend = spawnFrontend(["--mode", "rpc"], pidPath, false, {
+				TMPDIR: root,
+				BASE_CONTEXT_TEST_ORPHAN_TRACKING: "valid",
+				BASE_CONTEXT_TEST_CLOSED_RPC_INPUT: "1",
+			});
+			let stdout = "";
+			let stderr = "";
+			frontend.stdout?.on("data", (chunk: Buffer) => {
+				stdout += chunk.toString("utf8");
+			});
+			frontend.stderr?.on("data", (chunk: Buffer) => {
+				stderr += chunk.toString("utf8");
+			});
+			const workerPid = await waitForWorkerPid(pidPath);
+			const commands = `${JSON.stringify({ id: "attempted", type: "mutation" })}\n${JSON.stringify({ type: "get_state", marker: "buffered" })}\n`;
+			if (eof) frontend.stdin?.end(commands);
+			else frontend.stdin?.write(commands);
+			if (eof) {
+				expect(await waitForExit(frontend)).toEqual({ code: 1, signal: null });
+				children.delete(frontend);
+				expect(
+					stdout
+						.trim()
+						.split("\n")
+						.map((line) => JSON.parse(line)),
+				).toEqual([
+					{
+						id: "attempted",
+						type: "response",
+						command: "mutation",
+						success: false,
+						error: "The isolated session worker stopped during this command; its result is uncertain and was not replayed",
+					},
+					{
+						type: "response",
+						command: "get_state",
+						success: false,
+						error: "The isolated session worker stopped before this command was sent",
+					},
+				]);
+				expect(existsSync(`${pidPath}.received`)).toBe(false);
+				await waitForProcessGone(workerPid);
+				return;
+			}
+			const replacementPid = await waitForReplacementWorkerPid(pidPath, workerPid).catch((error: unknown) => {
+				throw new Error(`Replacement failed; stdout=${stdout}; stderr=${stderr}`, { cause: error });
+			});
+			await vi.waitFor(() => expect(stdout).toContain('"marker":"buffered"'), { timeout: 5000 });
+			frontend.stdin?.end();
+			expect(await waitForExit(frontend)).toEqual({ code: 0, signal: null });
+			children.delete(frontend);
+			const responses = stdout
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			expect(responses).toEqual([
+				{
+					id: "attempted",
+					type: "response",
+					command: "mutation",
+					success: false,
+					error: "The isolated session worker stopped during this command; its result is uncertain and was not replayed",
+				},
+				{ type: "response", command: "get_state", success: true, marker: "buffered" },
+			]);
+			expect(readFileSync(`${pidPath}.received`, "utf8")).toBe("get_state\n");
+			expect(stderr).not.toContain("Unhandled");
+			await waitForProcessGone(workerPid);
+			await waitForProcessGone(replacementPid);
+		},
+		20_000,
+	);
+
+	it("settles child process errors through cleanup and reports attempted versus unsent commands", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-owned-worker-error-"));
+		tempDirs.push(root);
+		const pidPath = join(root, "worker.pid");
+		const frontend = spawnFrontend(["--mode", "rpc"], pidPath, false, {
+			TMPDIR: root,
+			BASE_CONTEXT_TEST_ORPHAN_TRACKING: "valid",
+			BASE_CONTEXT_TEST_CHILD_ERROR: "1",
+		});
+		let stdout = "";
+		let stderr = "";
+		frontend.stdout?.on("data", (chunk: Buffer) => {
+			stdout += chunk.toString("utf8");
+		});
+		frontend.stderr?.on("data", (chunk: Buffer) => {
+			stderr += chunk.toString("utf8");
+		});
+		const workerPid = await waitForWorkerPid(pidPath);
+		frontend.stdin?.end(
+			`${JSON.stringify({ id: "attempted", type: "mutation" })}\n${JSON.stringify({ id: "unsent", type: "get_state" })}\n`,
+		);
+		expect(await waitForExit(frontend)).toEqual({ code: 1, signal: null });
+		children.delete(frontend);
+		expect(
+			stdout
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line)),
+		).toEqual([
+			{
+				id: "attempted",
+				type: "response",
+				command: "mutation",
+				success: false,
+				error: "The isolated session worker stopped during this command; its result is uncertain and was not replayed",
+			},
+			{
+				id: "unsent",
+				type: "response",
+				command: "get_state",
+				success: false,
+				error: "The isolated session worker stopped before this command was sent",
+			},
+		]);
+		expect(stderr).toContain("fixture child process error");
+		expect(existsSync(`${pidPath}.terminated`)).toBe(true);
+		expect(Number(readFileSync(pidPath, "utf8").trim())).toBe(workerPid);
+		await waitForProcessGone(workerPid);
+		const paths = JSON.parse(readFileSync(`${pidPath}.tracking`, "utf8")) as {
+			journalPath: string;
+			recoveryDescriptorPath: string;
+		};
+		expect(existsSync(paths.journalPath)).toBe(false);
+		expect(existsSync(paths.recoveryDescriptorPath)).toBe(false);
+	});
+
 	it("fails pending RPC commands when stdin closes before the worker crashes", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-owned-worker-test-"));
 		tempDirs.push(root);
@@ -334,6 +469,45 @@ describe("owned session worker processes", () => {
 				error: "The isolated session worker stopped during this command; its result is uncertain and was not replayed",
 			})}\n`,
 		);
+		await waitForProcessGone(workerPid);
+	});
+
+	it("reports an unanswered write as uncertain when the frontend is terminated", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-owned-worker-signal-"));
+		tempDirs.push(root);
+		const pidPath = join(root, "worker.pid");
+		const frontend = spawnFrontend(["--mode", "rpc"], pidPath, false, {
+			TMPDIR: root,
+			BASE_CONTEXT_TEST_ORPHAN_TRACKING: "valid",
+			BASE_CONTEXT_TEST_CLOSED_RPC_INPUT: "1",
+			BASE_CONTEXT_TEST_REVERSE_RPC_RESPONSES: "1",
+		});
+		let stdout = "";
+		frontend.stdout?.on("data", (chunk: Buffer) => {
+			stdout += chunk.toString("utf8");
+		});
+		const workerPid = await waitForWorkerPid(pidPath);
+		const frontendPid = Number(readFileSync(`${pidPath}.frontend`, "utf8").trim());
+		frontendPids.add(frontendPid);
+		frontend.stdin?.write(`${JSON.stringify({ id: "pending", type: "get_state" })}\n`);
+		await vi.waitFor(() => expect(existsSync(`${pidPath}.received`)).toBe(true));
+		process.kill(frontendPid, "SIGTERM");
+		await vi.waitFor(() => expect(existsSync(`${pidPath}.terminated`)).toBe(true));
+		frontend.stdin?.end();
+		expect(await waitForExit(frontend)).toEqual({ code: 143, signal: null });
+		children.delete(frontend);
+		frontendPids.delete(frontendPid);
+		expect(stdout).toBe(
+			`${JSON.stringify({
+				id: "pending",
+				type: "response",
+				command: "get_state",
+				success: false,
+				error: "The isolated session worker stopped during this command; its result is uncertain and was not replayed",
+			})}\n`,
+		);
+		expect(readFileSync(`${pidPath}.received`, "utf8")).toBe("get_state\n");
+		expect(Number(readFileSync(pidPath, "utf8").trim())).toBe(workerPid);
 		await waitForProcessGone(workerPid);
 	});
 

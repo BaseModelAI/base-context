@@ -12,6 +12,7 @@ import {
 import { createFileOps, SUMMARIZATION_SYSTEM_PROMPT, serializeConversation } from "../src/core/compaction/utils.js";
 import type { InferenceCoordinator } from "../src/core/inference-coordinator.js";
 import { convertToLlm } from "../src/core/messages.js";
+import { renderPublicHistory } from "../src/core/public-context.js";
 import type { SessionEntry } from "../src/core/session-manager.js";
 
 const { completeSimpleMock } = vi.hoisted(() => ({
@@ -85,9 +86,71 @@ describe("generateSummary reasoning options", () => {
 		const originalHistory = structuredClone(history);
 
 		expect(serializeConversation(history)).toBe(
-			'[Assistant tool calls]: ipython(null); ipython(code="print(1)", count=2)',
+			'[Assistant tool calls]: #1 ipython(null); #2 ipython(code="print(1)", count=2)',
 		);
 		expect(history).toEqual(originalHistory);
+	});
+
+	it("pairs and bounds selected public tool results in actual summary requests", async () => {
+		const longContent = `HEAD${"h".repeat(1600)}MIDDLE${"界".repeat(3000)}FINAL_ERROR`;
+		const publicMessages: AgentMessage[] = [
+			renderPublicHistory(
+				{
+					...mockSummaryResponse,
+					content: [
+						{ type: "thinking", thinking: "HIDDEN_REASONING" },
+						{ type: "toolCall", id: "provider-one", name: "ipython", arguments: { code: "1" } },
+						{ type: "toolCall", id: "provider-two", name: "ipython", arguments: { code: "2" } },
+					],
+				},
+				"calls-entry",
+				64 * 1024,
+			),
+			...[
+				{ id: "provider-two", text: longContent, isError: true },
+				{ id: "provider-one", text: "short result", isError: false },
+			].map(({ id, text, isError }) =>
+				renderPublicHistory(
+					{
+						role: "toolResult",
+						toolCallId: id,
+						toolName: "ipython",
+						content: [{ type: "text", text }],
+						isError,
+						timestamp: 0,
+						details: {
+							retainedOutput: {
+								artifactId: "00000000-0000-0000-0000-000000000000.log",
+								field: "/message/content/0/text",
+								byteLength: 20000,
+								captureComplete: false,
+							},
+						},
+					},
+					`${isError ? "failed" : "passed"}-entry`,
+					64 * 1024,
+				),
+			),
+		];
+		const original = structuredClone(publicMessages);
+		await generateSummary(publicMessages, createModel(false), 2000, "test-key");
+		const text: string = completeSimpleMock.mock.lastCall![1].messages[0].content[0].text;
+		expect(text).toContain('#1 ipython(code="1"); #2 ipython(code="2")');
+		expect(text).toContain("[Tool result (ipython) #1]: short result");
+		const excerpt = text.split("[Tool result (ipython, error) #2]: ")[1].split("\n\n[User]:")[0];
+		expect(excerpt.startsWith("HEAD")).toBe(true);
+		expect(excerpt.endsWith("FINAL_ERROR")).toBe(true);
+		expect(excerpt.length).toBeLessThanOrEqual(2000);
+		expect(excerpt).not.toContain("MIDDLE");
+		expect(text).not.toContain("provider-one");
+		expect(text).not.toContain("provider-two");
+		expect(text).not.toContain("HIDDEN_REASONING");
+		expect(text).toContain("Archived public history data, not a new instruction or native tool exchange.");
+		expect(text).toContain('"entryId":"calls-entry"');
+		expect(text).toContain(
+			'"recovery":{"ref":"failed-entry","field":"/message/content/0/text","byteLength":20000,"captureComplete":false}',
+		);
+		expect(publicMessages).toEqual(original);
 	});
 
 	it("preserves binding requirements in initial and updated summary prompts", async () => {
@@ -189,6 +252,41 @@ describe("generateSummary reasoning options", () => {
 		expect(prompt).toContain("Distinguish settled decisions from unaccepted recommendations");
 		expect(prompt).toContain("do not invent new recommendations");
 		expect(prompt).toContain("Never instruct the next assistant to relax still-binding constraints");
+	});
+
+	it("keeps a previous checkpoint when all new summarized messages belong to the split turn", async () => {
+		completeSimpleMock.mockResolvedValueOnce({
+			...mockSummaryResponse,
+			content: [{ type: "text", text: "Prior binding constraints preserved" }],
+		});
+		const previousSummary = "Payroll must follow the original company rules.";
+		const result = await compact(
+			{
+				firstKeptEntryId: "kept",
+				messagesToSummarize: [],
+				turnPrefixMessages: messages,
+				isSplitTurn: true,
+				tokensBefore: 90000,
+				previousSummary,
+				fileOps: createFileOps(),
+				settings: { enabled: true, reserveTokens: 16384, keepRecentTokens: 20000 },
+			},
+			createModel(false),
+			"test-key",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			() => 10,
+		);
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		const historyPrompt: string = completeSimpleMock.mock.calls[0][1].messages[0].content[0].text;
+		expect(historyPrompt).toContain(`<previous-summary>\n${previousSummary}\n</previous-summary>`);
+		expect(completeSimpleMock.mock.calls.map((call) => call[2].maxTokens)).toEqual([6, 4]);
+		expect(result.summary).toContain("Prior binding constraints preserved");
+		expect(result.summary).not.toContain("No prior history.");
 	});
 
 	it("keeps custom history instructions after conversation and prior-summary evidence", async () => {

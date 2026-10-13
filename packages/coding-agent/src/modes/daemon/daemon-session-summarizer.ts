@@ -157,6 +157,7 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 		return undefined;
 	}
 	try {
+		signal?.throwIfAborted();
 		const response = await completeInference(
 			requests,
 			model,
@@ -220,6 +221,8 @@ export class DaemonSessionSummarizer {
 	private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	// Controller per in-flight summary so a closing session can abort its write.
 	private readonly inFlight = new Map<string, AbortController>();
+	private readonly generating = new Set<string>();
+	private observed = false;
 	private readonly refreshes = new Map<
 		string,
 		{ isCurrentSource: () => boolean; input?: string; attemptedAt?: number; wasWorking?: boolean }
@@ -298,6 +301,37 @@ export class DaemonSessionSummarizer {
 		}
 	}
 
+	/** Worker-wide recap interest supplied by actual roster/UI consumers, not transport attachment. */
+	setObserved(observed: boolean): void {
+		if (this.observed === observed) return;
+		this.observed = observed;
+		for (const state of this.listSessions()) {
+			if (state.runtime.session.settingsManager?.getStatusSummaries() !== "observed") continue;
+			if (observed) this.schedule(state, 0);
+			else {
+				this.cancelGeneration(state.activeSessionId);
+				if (!this.tasks.has(state.activeSessionId)) void this.summarize(state);
+			}
+		}
+	}
+
+	private allowsGeneration(state: ActiveSessionState): boolean {
+		const policy = state.runtime.session.settingsManager?.getStatusSummaries() ?? "always";
+		return policy === "always" || (policy === "observed" && this.observed);
+	}
+
+	private cancelGeneration(id: string): void {
+		const timer = this.debounceTimers.get(id);
+		if (timer) clearTimeout(timer);
+		this.debounceTimers.delete(id);
+		this.rerunRequested.delete(id);
+		if (this.generating.has(id)) {
+			this.inFlight.get(id)?.abort();
+			const refresh = this.refreshes.get(id);
+			if (refresh) refresh.attemptedAt = undefined;
+		}
+	}
+
 	/** Called when a session finishes a turn; debounce until the agent settles. */
 	notifyActivity(state: ActiveSessionState): void {
 		this.schedule(state, SETTLE_DEBOUNCE_MS);
@@ -306,6 +340,11 @@ export class DaemonSessionSummarizer {
 	private schedule(state: ActiveSessionState, delay: number): void {
 		const id = state.activeSessionId;
 		if (this.stopped || this.forgotten.has(id)) return;
+		if (!this.allowsGeneration(state)) {
+			this.cancelGeneration(id);
+			void this.summarize(state);
+			return;
+		}
 		const existing = this.debounceTimers.get(id);
 		if (existing) {
 			clearTimeout(existing);
@@ -321,6 +360,7 @@ export class DaemonSessionSummarizer {
 	private summarize(state: ActiveSessionState): Promise<void> {
 		const id = state.activeSessionId;
 		if (this.stopped || this.forgotten.has(id)) return Promise.resolve();
+		if (!this.allowsGeneration(state)) this.cancelGeneration(id);
 		const existing = this.tasks.get(id);
 		if (existing) {
 			this.rerunRequested.add(id);
@@ -352,6 +392,8 @@ export class DaemonSessionSummarizer {
 		const owesIdleVerdict = !isWorking && previous?.taskState === undefined;
 		const owesSummary = !isWorking && !previous?.summary;
 		const turnError = !isWorking ? terminalTurnError(messages) : undefined;
+		const allowsGeneration = this.allowsGeneration(state);
+		if (!allowsGeneration && turnError === undefined && previous?.basedOnMessageCount === messageCount) return;
 		// Compare exactly what the classifier sees, not message counts or hidden
 		// thinking/tool output beyond the bounded prompt.
 		const contextMessages = () => {
@@ -381,7 +423,8 @@ export class DaemonSessionSummarizer {
 		) {
 			return;
 		}
-		if (!reuse && turnError === undefined) {
+		const generates = !reuse && turnError === undefined && allowsGeneration;
+		if (generates) {
 			// A final working -> idle verdict must not wait behind the live recap.
 			const remaining = MIN_REFRESH_INTERVAL_MS - (Date.now() - (refresh.attemptedAt ?? -Infinity));
 			if (!finalTransition && remaining > 0) {
@@ -394,6 +437,7 @@ export class DaemonSessionSummarizer {
 		const controller = new AbortController();
 		const isCurrent = () =>
 			!controller.signal.aborted &&
+			(!generates || this.allowsGeneration(state)) &&
 			isCurrentSource() &&
 			isSessionWorking(state) === isWorking &&
 			session.messages.length === messageCount &&
@@ -405,20 +449,26 @@ export class DaemonSessionSummarizer {
 		let completedInput: string | undefined;
 		let changed = false;
 		try {
-			if (!reuse && turnError === undefined) requests = this.getRequests?.(session);
+			if (generates) {
+				if (!this.allowsGeneration(state)) return;
+				this.generating.add(id);
+				requests = this.getRequests?.(session);
+			}
 			const generated: AgentStatusResult | undefined =
 				reuse ??
 				(turnError !== undefined
 					? { summary: turnError, taskState: "needs_input" }
-					: await this.generate({
-							registry: session.modelRegistry,
-							model,
-							messages: contextMessages(),
-							isWorking,
-							sessionId,
-							signal: controller.signal,
-							requests,
-						}));
+					: generates
+						? await this.generate({
+								registry: session.modelRegistry,
+								model,
+								messages: contextMessages(),
+								isWorking,
+								sessionId,
+								signal: controller.signal,
+								requests,
+							})
+						: undefined);
 			// An unused capture otherwise counts this idle subject as working.
 			await requests?.dispose();
 			// A failed classification on an idle session would spin at "working"
@@ -426,7 +476,8 @@ export class DaemonSessionSummarizer {
 			// settle it to needs_input.
 			const result =
 				generated ??
-				(!isWorking && (owesIdleVerdict || owesSummary)
+				(!isWorking &&
+				(owesIdleVerdict || owesSummary || (!allowsGeneration && previous?.basedOnMessageCount !== messageCount))
 					? { summary: previous?.summary ?? "", taskState: "needs_input" as const }
 					: undefined);
 			if (!result) {
@@ -463,6 +514,7 @@ export class DaemonSessionSummarizer {
 				await requests?.dispose();
 			} finally {
 				this.inFlight.delete(id);
+				this.generating.delete(id);
 			}
 		}
 		if (status && isCurrent()) {

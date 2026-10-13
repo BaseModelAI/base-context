@@ -733,7 +733,8 @@ export class RpcClient {
 			this.pendingRequests.set(id, {
 				resolve: (response) => {
 					clearTimeout(timeout);
-					resolve(response);
+					if (!response.success) reject(new Error(response.error));
+					else resolve(response);
 				},
 				reject: (error) => {
 					clearTimeout(timeout);

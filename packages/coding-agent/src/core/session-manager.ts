@@ -1648,15 +1648,32 @@ export class SessionManager {
 	private indexed = false;
 	private header: SessionHeader | null = null;
 
-	private constructor(cwd: string, sessionDir: string, persist: boolean, options?: NewSessionOptions) {
+	private constructor(
+		cwd: string,
+		sessionDir: string,
+		persist: boolean,
+		options?: NewSessionOptions,
+		git?: GitContext,
+	) {
 		this.cwd = cwd;
 		this.sessionDir = sessionDir;
 		this.persist = persist;
 		if (persist) assertProductStatePath(sessionDir);
-		this._stageNewSession(options);
+		this._stageNewSession(options, git);
 	}
 
-	private _stageNewSession(options?: NewSessionOptions): void {
+	private static async _prepareNew(
+		cwd: string,
+		sessionDir: string,
+		persist: boolean,
+		options?: NewSessionOptions,
+	): Promise<SessionManager> {
+		const captured = options ? { ...options } : undefined;
+		const git = persist ? ((await captureGitContext(cwd)) ?? undefined) : undefined;
+		return new SessionManager(cwd, sessionDir, persist, captured, git);
+	}
+
+	private _stageNewSession(options?: NewSessionOptions, git?: GitContext): void {
 		this.finalizedToolMessages = new WeakMap();
 		let sessionId = options?.id ?? createSessionId();
 		let sessionFile: string | undefined;
@@ -1684,7 +1701,6 @@ export class SessionManager {
 
 		this.sessionId = sessionId;
 		const timestamp = new Date().toISOString();
-		const git = this.persist ? (captureGitContext(this.cwd) ?? undefined) : undefined;
 		const rlmDepth = hasExplicitRlmDepth
 			? options?.rlmDepth
 			: options?.parentSession
@@ -1742,7 +1758,9 @@ export class SessionManager {
 	private async _adopt(next: SessionManager): Promise<void> {
 		const previous = this.writeState;
 		try {
+			if (this.closing) throw new Error("Session source is closing");
 			await this._retire(previous);
+			if (this.closing) throw new Error("Session source is closing");
 		} catch (error) {
 			try {
 				await next.close();
@@ -1980,7 +1998,7 @@ export class SessionManager {
 		this.switching = true;
 		try {
 			await this.flushNow();
-			const next = new SessionManager(this.cwd, this.sessionDir, this.persist, options);
+			const next = await SessionManager._prepareNew(this.cwd, this.sessionDir, this.persist, options);
 			await next._openNew();
 			await this._adopt(next);
 			return this.sessionFile;
@@ -2074,7 +2092,7 @@ export class SessionManager {
 			await this.flushNow();
 			const dir = sessionDir ?? (this.sessionDir || getDefaultSessionDir(this.cwd));
 			const header = this.getHeader();
-			const next = new SessionManager(this.cwd, dir, true, {
+			const next = await SessionManager._prepareNew(this.cwd, dir, true, {
 				parentSession: header?.parentSession,
 				rlmDepth: resolveSessionRlmDepth(header ?? {}, dir),
 			});
@@ -2466,6 +2484,7 @@ export class SessionManager {
 				Object.assign(state, metadata);
 				state.metadataRefs = undefined;
 				if (advanceLeaf) {
+					if (explicitParent && snapshot.parentId !== state.leafId) state.branchSelectionRevision++;
 					state.leafId = snapshot.id;
 					if (!isCompactionBookkeeping(snapshot)) state.compactionRevision++;
 				}
@@ -2560,6 +2579,7 @@ export class SessionManager {
 					if (target?.type === "message" && target.message.role === "assistant")
 						target.message.usage = cloneUsage(snapshot.aggregateUsage);
 				}
+				if (explicitParent && snapshot.parentId !== state.leafId) state.branchSelectionRevision++;
 				state.leafId = snapshot.id;
 				if (!isCompactionBookkeeping(snapshot)) state.compactionRevision++;
 				if (this.writeState === state) {
@@ -2636,7 +2656,10 @@ export class SessionManager {
 		return (ownAppends = 0) => sourceIsCurrent() && state.compactionRevision === revision + ownAppends;
 	}
 
-	bindCompactionSink(limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS): BoundCompactionSink {
+	bindCompactionSink(
+		limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS,
+		assertOperationCurrent?: () => void,
+	): BoundCompactionSink {
 		const state = this.writeState;
 		const owner = state.owner;
 		const sessionId = this.sessionId;
@@ -2708,6 +2731,7 @@ export class SessionManager {
 						throw new Error("Context epoch does not match the bound source capture");
 				}
 				if (!isCurrent(compactionRevision)) throw new Error("Compaction source or branch changed");
+				assertOperationCurrent?.();
 			};
 			// Admission is synchronous; this append queues behind the capture before release can drain it.
 			const args = [
@@ -2975,7 +2999,7 @@ export class SessionManager {
 				branch: (association) => {
 					const requestOutput = capture(association);
 					if (!requestOutput) return undefined;
-					return (manager, branchFromId, summary, details, usage) => {
+					return (manager, branchFromId, summary, details, usage, assertOperationCurrent) => {
 						if (manager !== this || !ownsOutputSource()) return undefined;
 						const stale = new Error("Native branch summary source changed before append");
 						const assertCurrent = () => {
@@ -2983,10 +3007,15 @@ export class SessionManager {
 						};
 						return (async () => {
 							try {
-								return await this._branchWithSummary(branchFromId, summary, details, false, usage, {
-									requestOutput,
-									assertCurrent,
-								});
+								return await this._branchWithSummary(
+									branchFromId,
+									summary,
+									details,
+									false,
+									usage,
+									{ requestOutput, assertCurrent },
+									assertOperationCurrent,
+								);
 							} catch (error) {
 								// Only our final pre-write stale signal permits the ordinary unassociated append.
 								if (error === stale) return undefined;
@@ -3672,6 +3701,10 @@ export class SessionManager {
 	}
 
 	async appendGitState(git: GitContext): Promise<string> {
+		return this._appendGitState(git);
+	}
+
+	private async _appendGitState(git: GitContext, assertCurrent?: () => void): Promise<string> {
 		const entry: GitStateEntry = {
 			type: "git_state",
 			id: this.indexed ? "" : generateId(this.byId),
@@ -3679,17 +3712,28 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			git,
 		};
-		await this._appendEntry(entry);
+		await this._appendEntry(entry, false, undefined, undefined, assertCurrent);
 		return entry.id;
 	}
 
 	async recordGitStateIfChanged(): Promise<string | undefined> {
 		if (!this.persist) return undefined;
-		const git = captureGitContext(this.cwd);
-		if (!git) return undefined;
-		const last = this.getActiveGitContext();
-		if (last && gitContextsEqual(last, git)) return undefined;
-		return this.appendGitState(git);
+		this._assertMutable();
+		const ownsSource = this.captureCompactionSourceOwner();
+		const isCurrent = () => ownsSource() && !this.switching && !this.closing;
+		const git = await captureGitContext(this.cwd);
+		if (!git || !isCurrent()) return undefined;
+		const skipped = new Error("Git state capture is stale or unchanged");
+		try {
+			return await this._appendGitState(git, () => {
+				if (!isCurrent()) throw skipped;
+				const last = this.getActiveGitContext();
+				if (last && gitContextsEqual(last, git)) throw skipped;
+			});
+		} catch (error) {
+			if (error === skipped) return undefined;
+			throw error;
+		}
 	}
 
 	private getActiveGitContext(): GitContext | undefined {
@@ -4050,9 +4094,10 @@ export class SessionManager {
 		);
 	}
 
-	async branchTo(id: string | null): Promise<void> {
+	async branchTo(id: string | null, assertOperationCurrent?: () => void): Promise<void> {
 		this._assertMutable();
 		if (!this.indexed) {
+			assertOperationCurrent?.();
 			if (id === null) this.resetLeaf();
 			else this.branch(id);
 			return;
@@ -4062,6 +4107,7 @@ export class SessionManager {
 		await this._enqueue(state, 0, async () => {
 			const history = await this._acknowledgedHistory(state);
 			if (id !== null && !(await history.get(id))) throw new Error(`Entry ${id} not found`);
+			assertOperationCurrent?.();
 			const previous = state.leafId;
 			state.leafId = id;
 			try {
@@ -4398,8 +4444,17 @@ export class SessionManager {
 		details?: unknown,
 		fromHook?: boolean,
 		usage?: Usage,
+		assertOperationCurrent?: () => void,
 	): Promise<string> {
-		return this._branchWithSummary(branchFromId, summary, details, fromHook, usage);
+		return this._branchWithSummary(
+			branchFromId,
+			summary,
+			details,
+			fromHook,
+			usage,
+			undefined,
+			assertOperationCurrent,
+		);
 	}
 
 	private async _branchWithSummary(
@@ -4409,6 +4464,7 @@ export class SessionManager {
 		fromHook?: boolean,
 		usage?: Usage,
 		output?: { requestOutput: NativeRequestOutputAssociation; assertCurrent(): void },
+		assertOperationCurrent?: () => void,
 	): Promise<string> {
 		const state = this.writeState;
 		if (!this.indexed && branchFromId !== null && !this.byId.has(branchFromId)) {
@@ -4439,7 +4495,10 @@ export class SessionManager {
 					}
 				: undefined,
 			undefined,
-			output?.assertCurrent,
+			() => {
+				output?.assertCurrent();
+				assertOperationCurrent?.();
+			},
 		);
 		return entry.id;
 	}
@@ -4728,7 +4787,7 @@ export class SessionManager {
 	}
 
 	private static async _createCapturedFork(input: CapturedForkInput): Promise<SessionManager> {
-		const next = new SessionManager(input.cwd, input.sessionDir, input.persist, {
+		const next = await SessionManager._prepareNew(input.cwd, input.sessionDir, input.persist, {
 			parentSession: input.sourceFile,
 			rlmDepth: input.rlmDepth,
 		});
@@ -4806,12 +4865,17 @@ export class SessionManager {
 
 	async createBranchedSession(leafId: string): Promise<string | undefined> {
 		this._assertMutable();
+		const ownsSource = this.captureCompactionSourceOwner();
 		const next = await this.forkBranch(leafId);
-		this._assertMutable();
-		this.switching = true;
+		let switching = false;
 		try {
 			try {
+				this._assertMutable();
+				if (!ownsSource()) throw new Error("Session source or branch changed during fork preparation");
+				this.switching = true;
+				switching = true;
 				await this.flushNow();
+				if (!ownsSource()) throw new Error("Session source or branch changed during fork preparation");
 			} catch (error) {
 				try {
 					await next.close();
@@ -4823,12 +4887,12 @@ export class SessionManager {
 			await this._adopt(next);
 			return this.sessionFile;
 		} finally {
-			this.switching = false;
+			if (switching) this.switching = false;
 		}
 	}
 
 	static async create(cwd: string, sessionDir?: string, options?: NewSessionOptions): Promise<SessionManager> {
-		const manager = new SessionManager(cwd, sessionDir ?? getDefaultSessionDir(cwd), true, options);
+		const manager = await SessionManager._prepareNew(cwd, sessionDir ?? getDefaultSessionDir(cwd), true, options);
 		await manager._openNew();
 		return manager;
 	}
@@ -4836,7 +4900,11 @@ export class SessionManager {
 	static async open(path: string, sessionDir?: string, cwdOverride?: string): Promise<SessionManager> {
 		const target = assertProductStatePath(path);
 		if (!existsSync(target)) {
-			const manager = new SessionManager(cwdOverride ?? process.cwd(), sessionDir ?? dirname(target), true);
+			const manager = await SessionManager._prepareNew(
+				cwdOverride ?? process.cwd(),
+				sessionDir ?? dirname(target),
+				true,
+			);
 			manager.sessionFile = target;
 			await manager._openNew();
 			return manager;
@@ -4998,7 +5066,7 @@ export class SessionManager {
 	): Promise<SessionManager> {
 		const targetDirectory = resolve(sessionDir ?? getDefaultSessionDir(targetCwd));
 		const prepared = await SessionManager._prepareCopy(sourcePath, retention, limits, requiredSourceFormat);
-		const manager = new SessionManager(targetCwd, targetDirectory, true, {
+		const manager = await SessionManager._prepareNew(targetCwd, targetDirectory, true, {
 			parentSession: sourcePath,
 			rlmDepth: resolveSessionRlmDepth(prepared.sourceHeader, sourcePath),
 		});

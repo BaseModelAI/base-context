@@ -48,6 +48,7 @@ export type NativeBranchRequestOutputWriter = (
 	summary: string,
 	details?: unknown,
 	usage?: Usage,
+	assertOperationCurrent?: () => void,
 ) => Promise<string | undefined> | undefined;
 export type NativeBranchRequestOutputSource = (
 	association: NativeRequestOutputAssociation,

@@ -1,4 +1,5 @@
 import { createConnection, type Socket } from "node:net";
+import { validateCompletionTimeout, withCompletionDeadline } from "../../core/completion.js";
 import { serializeJsonLine } from "../rpc/jsonl.js";
 import { type PrivateFrame, PrivateFramedChannel } from "../session-worker/private-framing.js";
 import {
@@ -14,6 +15,7 @@ import {
 	DAEMON_PROTOCOL_VERSION,
 	type DaemonClosingReason,
 	type DaemonCommand,
+	type DaemonCommandCompatibility,
 	type DaemonOutbound,
 	type DaemonPeerTransportTicket,
 	type DaemonResponse,
@@ -23,6 +25,7 @@ import {
 	NATIVE_WORK_COMPATIBILITIES,
 } from "./daemon-protocol.js";
 import {
+	DAEMON_WORKER_COMMAND_COMPATIBILITY,
 	type DaemonPeerCommand,
 	type DaemonPeerCommandBody,
 	type DaemonWorkerCommand,
@@ -40,6 +43,7 @@ type DaemonWorkerAuthentication = Omit<Extract<DaemonWorkerCommand, { type: "wor
 export type DaemonWorkerFrameListener = (frame: PrivateFrame<DaemonWorkerFrameHeader>) => void;
 export type DaemonWorkerCloseListener = (error: Error) => void;
 type DaemonHello = Extract<DaemonOutbound, { type: "daemon_hello" }>;
+const MAX_REQUEST_TIMEOUT_MS = 2_147_483_647;
 
 export class DaemonWorkerAuthenticationError extends Error {}
 
@@ -73,6 +77,7 @@ export class DaemonWorkerClient {
 	private requestId = 0;
 	private helloMessage?: DaemonHello;
 	private compatibilityError?: DaemonWorkerCompatibilityError;
+	private closeCause?: Error;
 	private directPeer = false;
 	private directClosingReason?: DaemonClosingReason;
 	private readonly helloWaiters = new Set<{
@@ -99,6 +104,7 @@ export class DaemonWorkerClient {
 		if (this.socket) {
 			throw new Error("Daemon worker client is already connected");
 		}
+		this.closeCause = undefined;
 		const socket = createConnection(this.socketPath);
 		this.socket = socket;
 		this.channel = new PrivateFramedChannel(socket, isDaemonWorkerFrameHeader);
@@ -135,15 +141,16 @@ export class DaemonWorkerClient {
 		);
 	}
 
-	waitForHello(timeoutMs = 3000): Promise<DaemonHello> {
-		if (this.compatibilityError) return Promise.reject(this.compatibilityError);
-		if (this.helloMessage) {
-			return Promise.resolve(this.helloMessage);
-		}
+	async waitForHello(timeoutMs = 3000, signal?: AbortSignal): Promise<DaemonHello> {
+		signal?.throwIfAborted();
+		if (this.closeCause) throw this.closeCause;
+		if (this.compatibilityError) throw this.compatibilityError;
+		if (this.helloMessage) return this.helloMessage;
 		if (!this.socket || this.socket.destroyed) {
-			return Promise.reject(new Error("Daemon worker client is not connected"));
+			throw new Error("Daemon worker client is not connected");
 		}
-		return new Promise((resolve, reject) => {
+		let abort: (() => void) | undefined;
+		const hello = new Promise<DaemonHello>((resolve, reject) => {
 			const waiter = {
 				resolve,
 				reject,
@@ -153,6 +160,15 @@ export class DaemonWorkerClient {
 				}, timeoutMs),
 			};
 			this.helloWaiters.add(waiter);
+			abort = () => {
+				clearTimeout(waiter.timeout);
+				this.helloWaiters.delete(waiter);
+				reject(signal?.reason);
+			};
+			signal?.addEventListener("abort", abort, { once: true });
+		});
+		return hello.finally(() => {
+			if (abort) signal?.removeEventListener("abort", abort);
 		});
 	}
 
@@ -175,23 +191,53 @@ export class DaemonWorkerClient {
 		command: DaemonCommandBody,
 		timeoutMs = 30_000,
 		// Progress/recovery options are supervisor-transport features; a direct request fails fast instead of replaying (no double execution).
-		_options: DaemonClientRequestOptions = {},
+		options: DaemonClientRequestOptions & { signal?: AbortSignal } = {},
 	): Promise<DaemonResponse> {
-		const hello = await this.waitForHello();
+		if (command.type === "wait_for_headless_completion") {
+			validateCompletionTimeout(command.timeoutMs);
+			return withCompletionDeadline((signal) => this.requestUntilResponse(command, timeoutMs, signal), {
+				timeoutMs: command.timeoutMs === undefined ? undefined : command.timeoutMs + 1000,
+				signal: options.signal,
+				getBlockers: () => [{ kind: "worker_response", id: command.activeSessionId }],
+			});
+		}
+		return this.requestUntilResponse(command, timeoutMs, options.signal);
+	}
+
+	private async requestUntilResponse(
+		command: DaemonCommandBody,
+		timeoutMs: number,
+		signal?: AbortSignal,
+	): Promise<DaemonResponse> {
+		const startedAt = performance.now();
+		const hello = await this.waitForHello(3000, signal);
 		const missing = getDaemonCommandCompatibilities(command).find(
 			(requirement) => !meetsDaemonCommandCompatibility(hello, requirement),
 		);
 		if (missing) throw new DaemonCapabilityUnavailableError(command.type, missing.capability);
-		return this.requestWire(command, timeoutMs);
+		const admissionElapsedMs = performance.now() - startedAt;
+		if (command.type === "wait_for_headless_completion" && command.timeoutMs !== undefined) {
+			command = { ...command, timeoutMs: Math.max(0, command.timeoutMs - admissionElapsedMs) };
+		}
+		const response = await this.requestWire(command, timeoutMs, signal);
+		if (!response.success && response.errorInfo?.code === "completion_wait_timeout") {
+			return {
+				...response,
+				errorInfo: { ...response.errorInfo, elapsedMs: performance.now() - startedAt },
+			};
+		}
+		return response;
 	}
 
 	async requestWorker(command: DaemonWorkerCommandBody, timeoutMs = 30_000): Promise<DaemonResponse> {
 		await this.requireNativeOwner();
-		if (command.type === "worker_deliver_result") {
-			const requirement = DAEMON_COMMAND_COMPATIBILITY.send_result;
-			if (!meetsDaemonCommandCompatibility(await this.waitForHello(), requirement)) {
-				throw new DaemonCapabilityUnavailableError(command.type, requirement.capability);
-			}
+		const compatibilities: Partial<Record<DaemonWorkerCommand["type"], DaemonCommandCompatibility>> =
+			DAEMON_WORKER_COMMAND_COMPATIBILITY;
+		const requirement =
+			compatibilities[command.type] ??
+			(command.type === "worker_deliver_result" ? DAEMON_COMMAND_COMPATIBILITY.send_result : undefined);
+		if (requirement && !meetsDaemonCommandCompatibility(await this.waitForHello(), requirement)) {
+			throw new DaemonCapabilityUnavailableError(command.type, requirement.capability);
 		}
 		return this.requestWire(command, timeoutMs);
 	}
@@ -233,8 +279,9 @@ export class DaemonWorkerClient {
 		this.directPeer = true;
 	}
 
-	close(): void {
-		this.rejectAll(new Error("Daemon worker client closed"));
+	close(cause?: Error): void {
+		this.closeCause ??= cause;
+		this.rejectAll(this.closeCause ?? new Error("Daemon worker client closed"));
 		this.channel?.close();
 		this.channel = undefined;
 		this.socket?.destroy();
@@ -243,21 +290,46 @@ export class DaemonWorkerClient {
 		this.directClosingReason = undefined;
 	}
 
-	private async requestWire(command: DaemonWorkerWireCommandBody, timeoutMs: number): Promise<DaemonResponse> {
+	private async requestWire(
+		command: DaemonWorkerWireCommandBody,
+		timeoutMs: number,
+		signal?: AbortSignal,
+	): Promise<DaemonResponse> {
+		signal?.throwIfAborted();
 		if (!this.channel || !this.socket || this.socket.destroyed) {
-			throw new Error("Daemon worker client is not connected");
+			throw this.closeCause ?? new Error("Daemon worker client is not connected");
 		}
 		const id = `worker_${++this.requestId}`;
+		const startedAt = Date.now();
 		const fullCommand = { ...command, id } as DaemonWorkerWireCommand;
 		const response = new Promise<DaemonResponse>((resolve, reject) => {
-			const timeout = setTimeout(() => {
+			const onTimeout = () => {
+				const elapsedMs = Math.max(0, Date.now() - startedAt);
+				const remainingMs = timeoutMs - elapsedMs;
+				if (remainingMs > 0) {
+					const pending = this.pending.get(id);
+					if (pending) pending.timeout = setTimeout(onTimeout, Math.min(remainingMs, MAX_REQUEST_TIMEOUT_MS));
+					return;
+				}
 				this.pending.delete(id);
+				const startupDetails = command.type === "create" ? " lastStartupPhase: unknown." : "";
 				reject(
-					new DaemonWorkerProbeTimeoutError(`Timed out waiting for daemon worker response to ${command.type}`),
+					new DaemonWorkerProbeTimeoutError(
+						`Timed out waiting for daemon worker response to ${command.type}. Request ID: ${id}; elapsedMs: ${elapsedMs}.${startupDetails} Socket: ${this.socketPath}.`,
+					),
 				);
-			}, timeoutMs);
+			};
+			const timeout = setTimeout(onTimeout, Math.min(timeoutMs, MAX_REQUEST_TIMEOUT_MS));
 			this.pending.set(id, { resolve, reject, timeout });
 		});
+		const abort = () => {
+			const pending = this.pending.get(id);
+			if (!pending) return;
+			clearTimeout(pending.timeout);
+			this.pending.delete(id);
+			pending.reject(signal?.reason);
+		};
+		signal?.addEventListener("abort", abort, { once: true });
 		// A blocked socket write must not postpone the response timeout or connection-close rejection.
 		void this.channel
 			.send(
@@ -272,7 +344,7 @@ export class DaemonWorkerClient {
 					pending.reject(error instanceof Error ? error : new Error(String(error)));
 				}
 			});
-		return response;
+		return response.finally(() => signal?.removeEventListener("abort", abort));
 	}
 
 	private handleFrame(frame: PrivateFrame<DaemonWorkerFrameHeader>): void {
@@ -309,8 +381,7 @@ export class DaemonWorkerClient {
 							!DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSIONS.includes(parsed.protocol.version))
 					) {
 						this.compatibilityError = new DaemonWorkerCompatibilityError(parsed);
-						this.rejectAll(this.compatibilityError);
-						this.close();
+						this.close(this.compatibilityError);
 						return;
 					}
 					this.helloMessage = parsed;
@@ -395,9 +466,10 @@ export class DaemonWorkerClient {
 		this.channel = undefined;
 		this.directPeer = false;
 		this.directClosingReason = undefined;
-		this.rejectAll(error);
+		this.closeCause ??= error;
+		this.rejectAll(this.closeCause);
 		for (const listener of [...this.closeListeners]) {
-			listener(error);
+			listener(this.closeCause);
 		}
 	}
 }

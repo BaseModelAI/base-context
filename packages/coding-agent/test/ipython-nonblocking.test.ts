@@ -6,6 +6,7 @@ import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@ponyt
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import type { ExtensionContext } from "../src/core/extensions/types.js";
 import {
 	createDeferred,
 	type ExecuteResult,
@@ -15,7 +16,12 @@ import {
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
-import { IpythonKernelProvisioner, type IpythonPendingExecution } from "../src/core/tools/ipython.js";
+import { buildSystemPrompt } from "../src/core/system-prompt.js";
+import {
+	createIpythonToolDefinition,
+	IpythonKernelProvisioner,
+	type IpythonPendingExecution,
+} from "../src/core/tools/ipython.js";
 import { createTestResourceLoader } from "./utilities.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -23,6 +29,7 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 	vi.restoreAllMocks();
+	vi.useRealTimers();
 });
 
 function controlledSession(responses: Parameters<ReturnType<typeof registerFauxProvider>["setResponses"]>[0]) {
@@ -105,6 +112,104 @@ function controlledSession(responses: Parameters<ReturnType<typeof registerFauxP
 function tool(name: string, args: Record<string, unknown>) {
 	return fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 }
+
+describe("configured IPython foreground wait", () => {
+	it("uses the same validated wait in settings and prompt, including zero", () => {
+		expect(SettingsManager.inMemory().getForegroundWaitMs()).toBe(1000);
+		for (const value of [0, 1500, 3_000_000_000]) {
+			const foregroundWaitMs = SettingsManager.inMemory({ foregroundWaitMs: value }).getForegroundWaitMs();
+			expect(foregroundWaitMs).toBe(value);
+			expect(buildSystemPrompt({ cwd: "/tmp", foregroundWaitMs })).toContain(`after ${value / 1000} seconds`);
+		}
+		expect(() => SettingsManager.inMemory({ foregroundWaitMs: -1 }).getForegroundWaitMs()).toThrow(
+			"finite nonnegative",
+		);
+	});
+
+	it("yields promptly on abort during a long foreground wait without releasing ownership", async () => {
+		vi.useFakeTimers();
+		const result = createDeferred<ExecuteResult>();
+		const physical = createDeferred<void>();
+		const controller = new AbortController();
+		const execute = vi.fn<KernelClient["execute"]>(async (_code, options) => {
+			options?.onExecutionStarted?.({
+				id: "abort-cell",
+				settled: physical.promise,
+				interrupt: async () => {},
+				snapshot: () => ({ stdout: "partial", stderr: "", durationMs: 10 }),
+			});
+			return result.promise;
+		});
+		const provisioner = { ensure: async () => ({ execute }) } as unknown as IpythonKernelProvisioner;
+		const tool = createIpythonToolDefinition("/tmp", { provisioner, foregroundWaitMs: 60_000 });
+		const ctx = {} as ExtensionContext;
+		const invocation = tool.execute("start", { code: "run()" }, controller.signal, undefined, ctx);
+		await vi.advanceTimersByTimeAsync(10);
+		controller.abort();
+		await expect(invocation).resolves.toMatchObject({ details: { status: "pending", executionId: "abort-cell" } });
+		const rejected = await tool.execute("new", { code: "must_not_run()" }, undefined, undefined, ctx);
+		expect(rejected).toMatchObject({ isError: true });
+		result.resolve({ stdout: "partial", stderr: "", status: "aborted", durationMs: 10 });
+		physical.resolve();
+		await vi.advanceTimersByTimeAsync(0);
+		const final = await tool.execute(
+			"collect",
+			{ action: "status", execution_id: "abort-cell" },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(final.details.status).toBe("aborted");
+		expect(execute).toHaveBeenCalledOnce();
+	});
+
+	it.each([1200, 2000])("waits 1500 ms for physical settlement at %s ms", async (settleMs) => {
+		vi.useFakeTimers();
+		const result = createDeferred<ExecuteResult>();
+		const settled = createDeferred<void>();
+		const interrupt = vi.fn(async () => {});
+		const handle: KernelExecutionHandle = {
+			id: "configured-cell",
+			settled: settled.promise,
+			interrupt,
+			snapshot: () => ({ stdout: "", stderr: "", durationMs: 1500 }),
+		};
+		const execute = vi.fn<KernelClient["execute"]>(async (_code, options) => {
+			options?.onExecutionStarted?.(handle);
+			setTimeout(() => result.resolve({ stdout: "final", stderr: "", status: "ok", durationMs: 1200 }), 1200);
+			setTimeout(() => settled.resolve(), settleMs);
+			return result.promise;
+		});
+		const provisioner = { ensure: async () => ({ execute }) } as unknown as IpythonKernelProvisioner;
+		const onExecutionPending = vi.fn<(execution: IpythonPendingExecution) => void>();
+		const tool = createIpythonToolDefinition("/tmp", { provisioner, foregroundWaitMs: 1500, onExecutionPending });
+		const ctx = {} as ExtensionContext;
+		const invocation = tool.execute("start", { code: "run()" }, undefined, undefined, ctx);
+		await vi.advanceTimersByTimeAsync(1500);
+		const initial = await invocation;
+		const owned = onExecutionPending.mock.calls[0][0];
+		if (settleMs <= 1500) {
+			expect(initial.details.status).toBe("ok");
+			expect(owned.notificationRequired).toBe(false);
+		} else {
+			expect(initial.details).toMatchObject({ status: "pending", executionId: "configured-cell" });
+			expect(owned.notificationRequired).toBe(true);
+			await vi.advanceTimersByTimeAsync(500);
+			await owned.completion;
+			const collected = await tool.execute(
+				"collect",
+				{ action: "status", execution_id: owned.id },
+				undefined,
+				undefined,
+				ctx,
+			);
+			expect(collected.details).toMatchObject({ status: "ok", stdout: "final" });
+			expect(owned.notificationRequired).toBe(false);
+		}
+		expect(execute).toHaveBeenCalledTimes(1);
+		expect(interrupt).not.toHaveBeenCalled();
+	});
+});
 
 describe("owned nonblocking IPython execution", () => {
 	it.each(["ok", "error"] as const)(

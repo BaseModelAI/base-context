@@ -759,6 +759,9 @@ class BashHandle:
         ):
             self._setup_resources = False
 
+    def __reduce_ex__(self, protocol: int) -> Any:
+        raise TypeError("BashHandle owns process resources and cannot be snapshotted")
+
     def __await__(self) -> Generator[Any, None, BashResult]:
         # A handle awaited before any other API use is a one-shot command tied
         # to the await (kill-on-cancel); touching the handle API first marks it

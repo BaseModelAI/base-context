@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { getDaemonLogPath } from "../../config.js";
+import { validateCompletionTimeout, withCompletionDeadline } from "../../core/completion.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import {
 	createDaemonCommandEnvelope,
@@ -23,7 +24,11 @@ import {
 	meetsDaemonCommandCompatibility,
 	NATIVE_WORK_COMPATIBILITIES,
 } from "./daemon-protocol.js";
-import type { DaemonWorkerCommand, DaemonWorkerCommandBody } from "./daemon-worker-protocol.js";
+import {
+	DAEMON_WORKER_COMMAND_COMPATIBILITY,
+	type DaemonWorkerCommand,
+	type DaemonWorkerCommandBody,
+} from "./daemon-worker-protocol.js";
 
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 export type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
@@ -51,6 +56,7 @@ interface PendingDaemonRequest {
 	reject: (error: Error) => void;
 	timeout?: ReturnType<typeof setTimeout>;
 	timeoutMs: number;
+	startedAt: number;
 	commandType: string;
 	onProgress?: DaemonClientProgressListener;
 	wireData: string;
@@ -145,6 +151,7 @@ const DEFAULT_RECONNECT_TIMEOUT_MS = 60_000;
 const RECONNECT_CONNECT_TIMEOUT_MS = 1000;
 const RECONNECT_HELLO_TIMEOUT_MS = 3000;
 const MAX_RECONNECT_DELAY_MS = 2000;
+const MAX_REQUEST_TIMEOUT_MS = 2_147_483_647;
 
 export class DaemonClient {
 	private socket?: Socket;
@@ -183,7 +190,8 @@ export class DaemonClient {
 	}
 
 	/** Wait for the daemon_hello greeting sent on connect. */
-	async waitForHello(timeoutMs = 3000): Promise<DaemonHello> {
+	async waitForHello(timeoutMs = 3000, signal?: AbortSignal): Promise<DaemonHello> {
+		signal?.throwIfAborted();
 		if (this.handshakeError) throw this.handshakeError;
 		if (this.helloMessage) {
 			return this.helloMessage;
@@ -193,7 +201,8 @@ export class DaemonClient {
 				`Cannot wait for the Base Context daemon handshake because the daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
 			);
 		}
-		return new Promise<DaemonHello>((resolve, reject) => {
+		let abort: (() => void) | undefined;
+		const hello = new Promise<DaemonHello>((resolve, reject) => {
 			const waiter = {
 				resolve,
 				reject,
@@ -207,6 +216,15 @@ export class DaemonClient {
 				}, timeoutMs),
 			};
 			this.helloWaiters.add(waiter);
+			abort = () => {
+				clearTimeout(waiter.timeout);
+				this.helloWaiters.delete(waiter);
+				reject(signal?.reason);
+			};
+			signal?.addEventListener("abort", abort, { once: true });
+		});
+		return hello.finally(() => {
+			if (abort) signal?.removeEventListener("abort", abort);
 		});
 	}
 
@@ -340,13 +358,34 @@ export class DaemonClient {
 		timeoutMs = 30000,
 		options: DaemonClientRequestOptions = {},
 	): Promise<DaemonResponse> {
+		if (command.type === "wait_for_headless_completion") {
+			validateCompletionTimeout(command.timeoutMs);
+			return withCompletionDeadline(
+				(signal) => this.requestUntilResponse(command, timeoutMs, { ...options, recoverable: false }, signal),
+				{
+					timeoutMs: command.timeoutMs === undefined ? undefined : command.timeoutMs + 1000,
+					getBlockers: () => [{ kind: "supervisor_response", id: command.activeSessionId }],
+				},
+			);
+		}
+		return this.requestUntilResponse(command, timeoutMs, options);
+	}
+
+	private async requestUntilResponse(
+		command: DaemonCommandBody,
+		timeoutMs: number,
+		options: DaemonClientRequestOptions,
+		signal?: AbortSignal,
+	): Promise<DaemonResponse> {
+		const startedAt = performance.now();
+		signal?.throwIfAborted();
 		if (this.handshakeError) throw this.handshakeError;
 		if (!this.socket || this.socket.destroyed) {
 			throw new Error(
 				`Cannot send daemon command "${command.type}" because the Base Context daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
 			);
 		}
-		const hello = this.helloMessage ?? (await this.waitForHello());
+		const hello = this.helloMessage ?? (await this.waitForHello(3000, signal));
 		const compatibilities = getDaemonCommandCompatibilities(command);
 		const missingCompatibility = compatibilities.find(
 			(compatibility) => !meetsDaemonCommandCompatibility(hello, compatibility),
@@ -354,14 +393,26 @@ export class DaemonClient {
 		if (missingCompatibility) {
 			throw new DaemonCapabilityUnavailableError(command.type, missingCompatibility.capability);
 		}
+		const admissionElapsedMs = performance.now() - startedAt;
+		if (command.type === "wait_for_headless_completion" && command.timeoutMs !== undefined) {
+			command = { ...command, timeoutMs: Math.max(0, command.timeoutMs - admissionElapsedMs) };
+		}
 		const envelopeProtocolVersion = Math.min(hello.protocol.version, DAEMON_PROTOCOL_VERSION);
-		return this.requestWire(
+		const response = await this.requestWire(
 			command,
 			timeoutMs,
 			options,
 			envelopeProtocolVersion >= DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION ? envelopeProtocolVersion : undefined,
 			compatibilities,
+			signal,
 		);
+		if (!response.success && response.errorInfo?.code === "completion_wait_timeout") {
+			return {
+				...response,
+				errorInfo: { ...response.errorInfo, elapsedMs: performance.now() - startedAt },
+			};
+		}
+		return response;
 	}
 
 	async authenticateWorker(token: string, timeoutMs = 3000): Promise<void> {
@@ -378,7 +429,19 @@ export class DaemonClient {
 			(requirement) => !meetsDaemonCommandCompatibility(hello, requirement),
 		);
 		if (missing) throw new DaemonCapabilityUnavailableError(command.type, missing.capability);
-		return this.requestWire(command, timeoutMs, {}, undefined, NATIVE_WORK_COMPATIBILITIES);
+		const compatibilities: Partial<Record<DaemonWorkerCommand["type"], DaemonCommandCompatibility>> =
+			DAEMON_WORKER_COMMAND_COMPATIBILITY;
+		const requirement = compatibilities[command.type];
+		if (requirement && !meetsDaemonCommandCompatibility(hello, requirement)) {
+			throw new DaemonCapabilityUnavailableError(command.type, requirement.capability);
+		}
+		return this.requestWire(
+			command,
+			timeoutMs,
+			{},
+			undefined,
+			requirement ? [...NATIVE_WORK_COMPATIBILITIES, requirement] : NATIVE_WORK_COMPATIBILITIES,
+		);
 	}
 
 	private async requestWire(
@@ -387,7 +450,9 @@ export class DaemonClient {
 		options: DaemonClientRequestOptions = {},
 		publicEnvelopeProtocolVersion?: DaemonProtocolVersion,
 		compatibilities: readonly DaemonCommandCompatibility[] = [],
+		signal?: AbortSignal,
 	): Promise<DaemonResponse> {
+		signal?.throwIfAborted();
 		if (!this.socket || this.socket.destroyed) {
 			throw new Error(
 				`Cannot send daemon command "${command.type}" because the Base Context daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
@@ -408,11 +473,12 @@ export class DaemonClient {
 		const acknowledgeResult =
 			publicEnvelopeProtocolVersion !== undefined && isDaemonMutatingCommand(fullCommand as DaemonCommand);
 
-		return new Promise((resolve, reject) => {
+		const response = new Promise<DaemonResponse>((resolve, reject) => {
 			const pending: PendingDaemonRequest = {
 				resolve,
 				reject,
 				timeoutMs,
+				startedAt: Date.now(),
 				commandType: command.type,
 				onProgress: options.onProgress,
 				wireData,
@@ -425,17 +491,36 @@ export class DaemonClient {
 			this.armPendingRequestTimeout(id, pending);
 			this.socket!.write(wireData);
 		});
+		const abort = () => {
+			const pending = this.pendingRequests.get(id);
+			if (!pending) return;
+			if (pending.timeout) clearTimeout(pending.timeout);
+			this.pendingRequests.delete(id);
+			pending.reject(signal?.reason);
+		};
+		signal?.addEventListener("abort", abort, { once: true });
+		if (signal?.aborted) abort();
+		return response.finally(() => signal?.removeEventListener("abort", abort));
 	}
 
 	private armPendingRequestTimeout(id: string, pending: PendingDaemonRequest): void {
-		pending.timeout = setTimeout(() => {
+		const timeoutStartedAt = Date.now();
+		const onTimeout = () => {
+			const remainingMs = pending.timeoutMs - Math.max(0, Date.now() - timeoutStartedAt);
+			if (remainingMs > 0) {
+				pending.timeout = setTimeout(onTimeout, Math.min(remainingMs, MAX_REQUEST_TIMEOUT_MS));
+				return;
+			}
 			this.pendingRequests.delete(id);
+			const elapsedMs = Math.max(0, Date.now() - pending.startedAt);
+			const startupDetails = pending.commandType === "create" ? " lastStartupPhase: unknown." : "";
 			pending.reject(
 				new Error(
-					`Timed out after ${pending.timeoutMs}ms waiting for the Base Context daemon response to "${pending.commandType}". ${daemonEndpointDetails(this.socketPath)}`,
+					`Timed out after ${elapsedMs}ms waiting for the Base Context daemon response to "${pending.commandType}". Request ID: ${id}; elapsedMs: ${elapsedMs}.${startupDetails} ${daemonEndpointDetails(this.socketPath)}`,
 				),
 			);
-		}, pending.timeoutMs);
+		};
+		pending.timeout = setTimeout(onTimeout, Math.min(pending.timeoutMs, MAX_REQUEST_TIMEOUT_MS));
 	}
 
 	close(): void {

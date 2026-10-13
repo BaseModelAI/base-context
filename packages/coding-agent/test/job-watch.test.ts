@@ -19,6 +19,7 @@ function fixture(waitForDelivery = false, stateBudgetBytes?: number, sessionId =
 	let observation: Record<string, unknown> | undefined;
 	const cancelled: string[] = [];
 	const errors: unknown[] = [];
+	let persist: (state: JobWatchSnapshot) => Promise<void> = async () => {};
 	let retain: () => Promise<string | undefined> = async () => "/retained/probe.log";
 	const controller = new JobWatchController({
 		sessionId,
@@ -27,6 +28,7 @@ function fixture(waitForDelivery = false, stateBudgetBytes?: number, sessionId =
 		goalId: () => goalId,
 		now: () => now,
 		persist: async (state) => {
+			await persist(state);
 			stored = structuredClone(state);
 		},
 		cancelProbe: (id) => {
@@ -88,6 +90,9 @@ function fixture(waitForDelivery = false, stateBudgetBytes?: number, sessionId =
 		setGoal: (value: string) => {
 			goalId = value;
 		},
+		setPersist: (value: typeof persist) => {
+			persist = value;
+		},
 		setRetain: (value: typeof retain) => {
 			retain = value;
 		},
@@ -121,6 +126,78 @@ function observe(
 }
 
 describe("job-watch deterministic scheduling", () => {
+	it("does not readmit consumed evidence while a resumed flush awaits persistence", async () => {
+		const f = fixture(true);
+		const first = await watch(f, { report_every: "5m" });
+		const second = await watch(f, { resource_id: "second", report_every: "5m" });
+		f.setAdmits(false);
+		await f.advance();
+		const event = f.snapshot().watches[0].pending[0];
+		let release!: () => void;
+		let started!: () => void;
+		const entered = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let block = true;
+		f.setPersist(async () => {
+			if (!block) return;
+			block = false;
+			started();
+			await held;
+		});
+		f.setAdmits(true);
+		const flushing = f.controller.flushPending();
+		await entered;
+		try {
+			expect(await f.controller.consume(first.id)).toEqual({
+				events: [JSON.parse(event.text)],
+				deferred_event_ids: [],
+			});
+		} finally {
+			release();
+			await flushing;
+		}
+		expect(f.notices).toHaveLength(1);
+		expect(f.notices[0]).toMatchObject({ watch_id: second.id, reasons: ["report"] });
+		expect(f.deliveries.has(event.id)).toBe(false);
+		expect(f.controller.status(first.id)).toMatchObject({ pending_events: 0 });
+	});
+
+	it("keeps late-park promotion scoped and releases its hold on explicit consume", async () => {
+		const f = fixture(true);
+		const awaited = await watch(f);
+		const background = await watch(f, { resource_id: "background" });
+		await observe(f, awaited, f.observation("succeeded"));
+		await observe(f, background, f.observation("succeeded"));
+		const [awaitedEvent, backgroundEvent] = f.snapshot().watches.map((item) => item.pending[0]);
+		expect(f.notices).toEqual([]);
+		f.setAdmits(false);
+
+		expect(await f.controller.park([awaited.id])).toMatchObject({ parked: true });
+		expect(f.controller.isParked()).toBe(true);
+		expect(f.snapshot().watches[0].pending).toEqual([{ ...awaitedEvent, wake: true, uncertain: false }]);
+		expect(f.snapshot().watches[1].pending).toEqual([backgroundEvent]);
+		expect(f.notices).toEqual([]);
+
+		expect(await f.controller.consume(awaited.id)).toEqual({
+			events: [JSON.parse(awaitedEvent.text)],
+			deferred_event_ids: [],
+		});
+		expect(f.controller.isParked()).toBe(false);
+		expect(await f.controller.park([awaited.id])).toEqual({ parked: false, reason: "event_available" });
+		f.setAdmits(true);
+		await f.controller.flushPending();
+		expect(f.notices).toEqual([]);
+		expect(f.snapshot().watches[1].pending).toEqual([backgroundEvent]);
+		expect(await f.controller.consume(background.id)).toEqual({
+			events: [JSON.parse(backgroundEvent.text)],
+			deferred_event_ids: [],
+		});
+		expect(await f.controller.consume()).toEqual({ events: [], deferred_event_ids: [] });
+	});
 	it("checks twenty times without a wake, then admits one terminal event despite callback races", async () => {
 		const f = fixture();
 		const w = await watch(f, { completion_source: "handle", probe_command: undefined });

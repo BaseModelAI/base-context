@@ -312,12 +312,17 @@ export class JobWatchController {
 			const selected = ids.map((id) => this.require(id));
 			if (!this.owned() || selected.some((w) => w.goal_id !== this.hooks.goalId()))
 				throw new Error("Watch owner changed");
-			// A completion racing registration/park is already actionable; do not wait forever.
-			if (selected.some((w) => !w.active || w.pending.some((event) => !event.routine)))
-				return { parked: false, reason: "event_available" };
+			const available = selected.some((w) => !w.active || w.pending.some((event) => !event.routine));
+			const pending = selected.flatMap((watch) =>
+				watch.pending.filter((event) => !event.routine && !event.admitted && !this.deliveryPending(event.id)),
+			);
+			if (available && pending.length === 0) return { parked: false, reason: "event_available" };
 			this.parked = { ids: [...new Set(ids)], goal_id: this.hooks.goalId() };
+			// Explicitly awaiting a retained completion owns its delivery, even if admission is paused.
+			for (const event of pending) event.wake = true;
 			await this.save();
-			return { parked: true, ids: this.parked.ids };
+			if (available) await this.flushPending();
+			return this.parked ? { parked: true, ids: this.parked.ids } : { parked: false, reason: "event_available" };
 		});
 	}
 	isParked(): boolean {
@@ -380,7 +385,13 @@ export class JobWatchController {
 					continue;
 				}
 				events.push(snapshot.body);
-				snapshot.watch.pending.splice(index, 1);
+				const [event] = snapshot.watch.pending.splice(index, 1);
+				if (
+					!event.routine &&
+					snapshot.watch.goal_id === this.hooks.goalId() &&
+					this.parked?.ids.includes(snapshot.watch.id)
+				)
+					this.parked = undefined;
 				this.queued.delete(snapshot.id);
 				this.pruneUnregistered(snapshot.watch);
 			}
@@ -646,13 +657,14 @@ export class JobWatchController {
 					this.queued.has(event.id)
 				)
 					continue;
-				const deliveryText = this.deliveryText(event);
 				if (this.hooks.waitForDelivery) {
 					event.uncertain = true;
 					await this.save();
 				}
 				if (!this.owned() || (!event.admitted && watch.goal_id !== this.hooks.goalId())) return;
-				if (!this.hooks.admit(deliveryText, event.id)) {
+				// Explicit consumption may remove evidence while a resumed flush persists its intent.
+				if (!watch.pending.includes(event)) continue;
+				if (!this.hooks.admit(this.deliveryText(event), event.id)) {
 					event.uncertain = false;
 					await this.save();
 					break;

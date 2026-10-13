@@ -13,6 +13,7 @@ import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.
 import type { AgentSessionRuntimeMetadata } from "../../core/agent-session-runtime.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
+import type { CompletionWaitDiagnostics } from "../../core/completion.js";
 import type {
 	AgentCronJob,
 	AgentHeartbeatDeliveryMode,
@@ -103,8 +104,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 49 requires shared root-family subagent capacity and adds its get/set commands.
 // Revision 50 adds optional captured request usage to context-tree responses.
 // Revision 51 exposes the native family-completion barrier through JSON RPC.
-export const DAEMON_SCHEMA_REVISION = 51;
-export const DAEMON_SCHEMA_ID = "protocol-13-schema-51-rpc-family-completion";
+// Revision 52 adds optional completion deadlines and generated-status observer interest.
+export const DAEMON_SCHEMA_REVISION = 52;
+export const DAEMON_SCHEMA_ID = "protocol-13-schema-52-completion-status-interest";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -151,6 +153,8 @@ export type DaemonServerCapability =
 	| "authoritative_child_roster"
 	| "owned_session_recovery_context"
 	| "rlm_quiescence_barrier"
+	| "completion_wait_diagnostics"
+	| "status_summary_interest"
 	| "session_input_pause"
 	| "owned_prompt_cancellation"
 	| "acp_mcp_servers"
@@ -204,6 +208,8 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"authoritative_child_roster",
 	"owned_session_recovery_context",
 	"rlm_quiescence_barrier",
+	"completion_wait_diagnostics",
+	"status_summary_interest",
 	"session_input_pause",
 	"acp_mcp_servers",
 	"native_inference_ownership",
@@ -627,6 +633,9 @@ export type DaemonCommand =
 			type: "wait_for_headless_completion";
 			activeSessionId: string;
 			waitForRlmQuiescence?: boolean;
+			timeoutMs?: number;
+			/** Supervisor-owned observation identity, scoped to its worker connection. */
+			waitId?: string;
 	  }
 	| { id?: string; type: "get_session_header"; activeSessionId: string }
 	| { id?: string; type: "get_state"; activeSessionId: string }
@@ -777,6 +786,25 @@ export const CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY = {
 	minSchemaRevision: 49,
 	capability: "canonical_session_ownership",
 } as const satisfies DaemonCommandCompatibility;
+
+export const COMPLETION_WAIT_DIAGNOSTICS_COMPATIBILITY = {
+	minProtocol: 13,
+	minSchemaRevision: 52,
+	capability: "completion_wait_diagnostics",
+} as const satisfies DaemonCommandCompatibility;
+
+export const STATUS_SUMMARY_INTEREST_COMPATIBILITY = {
+	minProtocol: 13,
+	minSchemaRevision: 52,
+	capability: "status_summary_interest",
+} as const satisfies DaemonCommandCompatibility;
+
+export const DAEMON_COMMAND_FIELD_COMPATIBILITY = {
+	wait_for_headless_completion: {
+		timeoutMs: COMPLETION_WAIT_DIAGNOSTICS_COMPATIBILITY,
+		waitId: COMPLETION_WAIT_DIAGNOSTICS_COMPATIBILITY,
+	},
+} as const;
 
 export const NATIVE_WORK_COMPATIBILITIES = [
 	CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
@@ -1109,6 +1137,12 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 	if (command.type === "wait_for_headless_completion" && command.waitForRlmQuiescence === true) {
 		requirements.push(RLM_QUIESCENCE_BARRIER_COMMAND);
 	}
+	if (
+		command.type === "wait_for_headless_completion" &&
+		(command.timeoutMs !== undefined || command.waitId !== undefined)
+	) {
+		requirements.push(COMPLETION_WAIT_DIAGNOSTICS_COMPATIBILITY);
+	}
 	if (command.type === "cancel_prompt_admission" && command.cancelOwned === true) {
 		requirements.push(OWNED_PROMPT_CANCELLATION_COMMAND);
 	}
@@ -1146,6 +1180,7 @@ export type DaemonResponse =
 	  };
 
 export type DaemonErrorInfo =
+	| ({ code: "completion_wait_timeout" } & CompletionWaitDiagnostics)
 	| { code: "missing_session_cwd"; issue: SessionCwdIssue }
 	| { code: "session_import_file_not_found"; filePath: string }
 	| { code: "session_already_active"; sessionPath: string; activeSessionId?: string }
@@ -1345,6 +1380,7 @@ export const DAEMON_OUTBOUND_COMPATIBILITY = {
 
 /** Optional response metadata; the existing command remains available without this capability. */
 export const DAEMON_RESPONSE_FIELD_COMPATIBILITY = {
+	wait_for_headless_completion: { errorInfo: COMPLETION_WAIT_DIAGNOSTICS_COMPATIBILITY },
 	get_context_tree: {
 		ownRequestUsage: { minProtocol: 13, minSchemaRevision: 50, capability: "context_request_usage" },
 	},

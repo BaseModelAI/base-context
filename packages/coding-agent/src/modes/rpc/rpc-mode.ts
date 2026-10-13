@@ -3,6 +3,12 @@
  */
 
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
+import {
+	CompletionWaitTimeoutError,
+	observeCompletion,
+	validateCompletionTimeout,
+	withCompletionDeadline,
+} from "../../core/completion.js";
 import { takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import { InProcessAgentConnection } from "../agent-connection/in-process-agent-connection.js";
@@ -228,9 +234,24 @@ async function runRpcModeWithConnectionInternal(
 		});
 	}
 
-	const waitForCompletion = async () => {
-		await promptCommandTail;
-		await connection.waitForHeadlessCompletion({ waitForRlmQuiescence: true });
+	const waitForCompletion = async (timeoutMs?: number) => {
+		validateCompletionTimeout(timeoutMs);
+		const startedAt = performance.now();
+		await withCompletionDeadline((signal) => observeCompletion(promptCommandTail, signal), {
+			timeoutMs,
+			getBlockers: () => [{ kind: "prompt_admission" }],
+		});
+		try {
+			await connection.waitForHeadlessCompletion({
+				waitForRlmQuiescence: true,
+				...(timeoutMs !== undefined ? { timeoutMs: Math.max(0, timeoutMs - (performance.now() - startedAt)) } : {}),
+			});
+		} catch (error) {
+			if (error instanceof CompletionWaitTimeoutError) {
+				throw new CompletionWaitTimeoutError({ ...error.diagnostics, elapsedMs: performance.now() - startedAt });
+			}
+			throw error;
+		}
 	};
 
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
@@ -261,7 +282,7 @@ async function runRpcModeWithConnectionInternal(
 					),
 				);
 			case "wait_for_completion":
-				await waitForCompletion();
+				await waitForCompletion(command.timeoutMs);
 				return success(id, command.type);
 			case "get_state": {
 				const state = await connection.getState();
@@ -504,12 +525,15 @@ async function runRpcModeWithConnectionInternal(
 				output(await handleCommand(command));
 				if (command.type === "observe") activateObservation(command.activeSessionId);
 			} catch (commandError: unknown) {
+				const response = error(
+					command.id,
+					command.type,
+					commandError instanceof Error ? commandError.message : String(commandError),
+				);
 				output(
-					error(
-						command.id,
-						command.type,
-						commandError instanceof Error ? commandError.message : String(commandError),
-					),
+					commandError instanceof CompletionWaitTimeoutError
+						? { ...response, errorInfo: { code: "completion_wait_timeout", ...commandError.diagnostics } }
+						: response,
 				);
 			} finally {
 				if (isPrompt) {

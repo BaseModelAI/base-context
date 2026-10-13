@@ -19,6 +19,7 @@ import {
 	SESSION_JOURNAL_MAX_FRAME_BYTES,
 	SESSION_JOURNAL_MAX_RECORD_BYTES,
 	SessionJournalOwner,
+	sessionJournalErrorText,
 } from "../src/core/session-journal-owner.js";
 import { readSessionJournal } from "../src/core/session-journal-reader.js";
 
@@ -175,6 +176,29 @@ describe("session journal owner process", () => {
 		expect(existsSync(`${journalPath}.owner.sqlite`)).toBe(true);
 	});
 
+	it("preserves an underlying stat error across worker IPC without acknowledging an append", async () => {
+		const owner = await open(journalPath, true);
+		await owner.appendJson(header);
+		const snapshot = owner.getSnapshot();
+		const bytes = readFileSync(journalPath);
+		const movedPath = join(root, "moved.jsonl");
+		renameSync(journalPath, movedPath);
+
+		let failure: unknown;
+		try {
+			await owner.appendJson(lexical);
+		} catch (error) {
+			failure = error;
+		}
+		expect(failure).toBeInstanceOf(Error);
+		expect((failure as Error).message).toContain("Error [ENOENT]:");
+		expect((failure as Error).message).toContain("stat");
+		expect((failure as Error).message).toContain(journalPath);
+		expect(owner.getSnapshot()).toEqual(snapshot);
+		expect(readFileSync(movedPath)).toEqual(bytes);
+		await owner.close();
+	});
+
 	it("retains legacy bytes, requires explicit torn-tail repair, rejects complete corruption, and survives POSIX owner death", async () => {
 		const original = Buffer.from(`${header}\n${lexical}\n{"type":"message","id":"torn"`);
 		writeFileSync(journalPath, original);
@@ -287,8 +311,8 @@ describe("session journal owner process", () => {
 		const identityDetail =
 			`expected dev=${admittedSnapshot.dev}, ino=${admittedSnapshot.ino}; ` +
 			`observed dev=${observedIdentity.dev}, ino=${observedIdentity.ino}`;
-		await expect(replaced.appendJson(lexical)).rejects.toThrow(identityDetail);
-		await expect(replaced.recover()).rejects.toThrow(identityDetail);
+		await expect(replaced.appendJson(lexical)).rejects.toThrow(`operation=stat; ${identityDetail}`);
+		await expect(replaced.recover()).rejects.toThrow(`operation=fstat; ${identityDetail}`);
 		expect(replaced.getSnapshot()).toEqual(admittedSnapshot);
 		expect(replaced.getSnapshot().ino).not.toBe(statSync(replacedPath).ino);
 		expect(readFileSync(replacedPath)).toEqual(Buffer.from(first.line));
@@ -327,5 +351,17 @@ describe("session journal owner process", () => {
 		await successor.close();
 		expect(actor(successor).exitCode).toBe(0);
 		expect(framedJson(tornPath)).toEqual([...recovered, next]);
+	});
+});
+
+describe("session journal error text", () => {
+	it("retains error names, codes and causes within the IPC text limit", () => {
+		const cause = Object.assign(new Error("permission denied"), { code: "EACCES" });
+		expect(sessionJournalErrorText(new Error("stat failed", { cause }))).toBe(
+			"Error: stat failed\nCaused by: Error [EACCES]: permission denied",
+		);
+		const oversized = sessionJournalErrorText(new Error("x".repeat(9000), { cause }));
+		expect(oversized).toHaveLength(8192);
+		expect(oversized.startsWith("Error: ")).toBe(true);
 	});
 });

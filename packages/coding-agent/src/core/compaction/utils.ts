@@ -3,7 +3,9 @@
  */
 
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
-import type { Message } from "@ponythewhite/base-context-ai";
+import type { AssistantMessage, Message, ToolResultMessage } from "@ponythewhite/base-context-ai";
+import { convertToLlm } from "../messages.js";
+import { PUBLIC_CONTEXT_RENDERER } from "../public-context.js";
 export interface FileOperations {
 	read: Set<string>;
 	written: Set<string>;
@@ -18,10 +20,19 @@ export function createFileOps(): FileOperations {
 	};
 }
 
-/**
- * Extract file operations from tool calls in an assistant message.
- */
+/** Extract native edits and structured IPython edit results, not arbitrary Python writes. */
 export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOperations): void {
+	if (message.role === "toolResult" && message.toolName === "ipython") {
+		const details = message.details as { diffs?: unknown } | undefined;
+		if (Array.isArray(details?.diffs)) {
+			for (const diff of details.diffs) {
+				if (diff && typeof diff === "object" && "path" in diff && typeof diff.path === "string" && diff.path) {
+					fileOps.edited.add(diff.path);
+				}
+			}
+		}
+		return;
+	}
 	if (message.role !== "assistant") return;
 	if (!("content" in message) || !Array.isArray(message.content)) return;
 
@@ -60,11 +71,15 @@ export function computeFileLists(fileOps: FileOperations): { readFiles: string[]
  */
 export function formatFileOperations(readFiles: string[], modifiedFiles: string[]): string {
 	const sections: string[] = [];
+	const formatList = (files: string[]) => {
+		const shown = files.slice(0, 200).join("\n");
+		return files.length > 200 ? `${shown}\n[... ${files.length - 200} more files omitted]` : shown;
+	};
 	if (readFiles.length > 0) {
-		sections.push(`<read-files>\n${readFiles.join("\n")}\n</read-files>`);
+		sections.push(`<read-files>\n${formatList(readFiles)}\n</read-files>`);
 	}
 	if (modifiedFiles.length > 0) {
-		sections.push(`<modified-files>\n${modifiedFiles.join("\n")}\n</modified-files>`);
+		sections.push(`<modified-files>\n${formatList(modifiedFiles)}\n</modified-files>`);
 	}
 	if (sections.length === 0) return "";
 	return `\n\n${sections.join("\n\n")}`;
@@ -72,28 +87,52 @@ export function formatFileOperations(readFiles: string[], modifiedFiles: string[
 /** Maximum characters for a tool result in serialized summaries. */
 const TOOL_RESULT_MAX_CHARS = 2000;
 
-/**
- * Truncate text to a maximum character length for summarization.
- * Keeps the beginning and appends a truncation marker.
- */
+/** Keep both ends within a JavaScript-character budget, including the omission marker. */
 function truncateForSummary(text: string, maxChars: number): string {
 	if (text.length <= maxChars) return text;
-	const truncatedChars = text.length - maxChars;
-	return `${text.slice(0, maxChars)}\n\n[... ${truncatedChars} more characters truncated]`;
+	const marker = (omitted: number) => `\n\n[... ${omitted} characters omitted]\n\n`;
+	const retainedChars = maxChars - marker(text.length).length;
+	const tailChars = Math.min(500, retainedChars);
+	const headChars = retainedChars - tailChars;
+	return text.slice(0, headChars) + marker(text.length - headChars - tailChars) + text.slice(-tailChars);
 }
 
-/**
- * Serialize LLM messages to text for summarization.
- * This prevents the model from treating it as a conversation to continue.
- * Call convertToLlm() first to handle custom message types.
- *
- * Tool results are truncated to keep the summarization request within
- * reasonable token budgets. Full content is not needed for summarization.
- */
-export function serializeConversation(messages: Message[]): string {
-	const parts: string[] = [];
+type SummaryMessage =
+	| Extract<Message, { role: "user" }>
+	| Pick<AssistantMessage, "role" | "content">
+	| Pick<ToolResultMessage, "role" | "content" | "toolCallId" | "toolName" | "isError">;
 
-	for (const msg of messages) {
+/** Read only the selected public representation, never its archived source or hidden reasoning. */
+function publicSummaryView(message: AgentMessage): { message: SummaryMessage; prefix: string } | undefined {
+	if (
+		message.role !== "custom" ||
+		message.customType !== PUBLIC_CONTEXT_RENDERER ||
+		typeof message.content !== "string"
+	)
+		return undefined;
+	const separator = message.content.indexOf("\n");
+	if (separator < 0) return undefined;
+	try {
+		const data = JSON.parse(message.content.slice(separator + 1)) as Record<string, unknown>;
+		if (!data || (data.role !== "assistant" && data.role !== "toolResult") || !Array.isArray(data.content))
+			return undefined;
+		const { role, content, toolCallId, toolName, isError, ...addresses } = data;
+		return {
+			message: { role, content, toolCallId, toolName, isError } as SummaryMessage,
+			prefix: `${message.content.slice(0, separator)}\n${JSON.stringify(addresses)}`,
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+/** Serialize native and selected public messages, with bounded result excerpts and local call pairing. */
+export function serializeConversation(messages: AgentMessage[]): string {
+	const toolCallIndices = new Map<string, number>();
+	let nextToolCallIndex = 1;
+
+	const serializeMessage = (msg: SummaryMessage): string => {
+		const parts: string[] = [];
 		if (msg.role === "user") {
 			const content =
 				typeof msg.content === "string"
@@ -121,7 +160,9 @@ export function serializeConversation(messages: Message[]): string {
 							: Object.entries(args)
 									.map(([k, v]) => `${k}=${JSON.stringify(v)}`)
 									.join(", ");
-					toolCalls.push(`${block.name}(${argsStr})`);
+					const index = nextToolCallIndex++;
+					toolCallIndices.set(block.id, index);
+					toolCalls.push(`#${index} ${block.name}(${argsStr})`);
 				}
 			}
 
@@ -140,12 +181,22 @@ export function serializeConversation(messages: Message[]): string {
 				.map((c) => c.text)
 				.join("");
 			if (content) {
-				parts.push(`[Tool result]: ${truncateForSummary(content, TOOL_RESULT_MAX_CHARS)}`);
+				const index = toolCallIndices.get(msg.toolCallId);
+				const label = `[Tool result (${msg.toolName}${msg.isError ? ", error" : ""})${index === undefined ? "" : ` #${index}`}]`;
+				parts.push(`${label}: ${truncateForSummary(content, TOOL_RESULT_MAX_CHARS)}`);
 			}
 		}
-	}
+		return parts.join("\n\n");
+	};
 
-	return parts.join("\n\n");
+	return messages
+		.flatMap((message) => {
+			const view = publicSummaryView(message);
+			if (view) return [`[User]: ${view.prefix}\n${serializeMessage(view.message)}`];
+			return convertToLlm([message]).map(serializeMessage);
+		})
+		.filter(Boolean)
+		.join("\n\n");
 }
 export const SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assistant. Your task is to read a conversation between a user and an AI coding assistant, then produce a structured summary following the exact format specified.
 

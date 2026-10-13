@@ -54,6 +54,19 @@ export type SessionJournalResponse =
 
 type ResponseResult = Extract<SessionJournalResponse, { id: number }>;
 
+/** @internal Bounded text for journal-owner IPC errors. */
+export function sessionJournalErrorText(error: unknown): string {
+	let text = "";
+	for (let depth = 0; error !== undefined && depth < 4 && text.length < 8192; depth++) {
+		const code = error instanceof Error && "code" in error ? error.code : undefined;
+		const codeText = typeof code === "string" || typeof code === "number" ? ` [${code}]` : "";
+		const detail = error instanceof Error ? `${error.name}${codeText}: ${error.message}` : String(error);
+		text += `${text ? "\nCaused by: " : ""}${detail}`.slice(0, 8192 - text.length);
+		error = error instanceof Error ? error.cause : undefined;
+	}
+	return text;
+}
+
 function workerPath(): string {
 	const candidates = [
 		fileURLToPath(new URL("./session-journal-owner-worker.js", import.meta.url)),

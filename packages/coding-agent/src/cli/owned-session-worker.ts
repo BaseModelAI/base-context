@@ -218,12 +218,19 @@ export async function runOwnedSessionWorkerFrontend(
 	let rpcStdoutPaused = false;
 	let detachRpcInput: (() => void) | undefined;
 	let detachRpcOutput: (() => void) | undefined;
-	const bufferedRpcInput: string[] = [];
+	type PreparedRpcInput = {
+		framed: string;
+		pending?: { internalId: string; publicId?: string; command: string };
+	};
+	const bufferedRpcInput: PreparedRpcInput[] = [];
 	const pendingRpcCommands = new Map<string, { publicId?: string; command: string }>();
+	const failedWorkerInputs = new WeakSet<ChildProcess>();
+	let rpcInputPaused = false;
+	let failCurrentInput: (() => void) | undefined;
 	const anonymousRpcIdPrefix = `prime-agent-owned-${randomUUID()}`;
 	let anonymousRpcCommandId = 0;
 
-	const prepareRpcInput = (line: string): string => {
+	const prepareRpcInput = (line: string): PreparedRpcInput => {
 		try {
 			const command = JSON.parse(line) as { id?: unknown; type?: unknown } | null;
 			if (
@@ -233,16 +240,46 @@ export async function runOwnedSessionWorkerFrontend(
 				command.type === "extension_ui_response" ||
 				command.type === "ack_result"
 			) {
-				return `${line}\n`;
+				return { framed: `${line}\n` };
 			}
 			const publicId = typeof command.id === "string" ? command.id : undefined;
 			const internalId = publicId ?? `${anonymousRpcIdPrefix}-${++anonymousRpcCommandId}`;
-			pendingRpcCommands.set(internalId, { publicId, command: command.type });
-			return publicId !== undefined ? `${line}\n` : serializeJsonLine({ ...command, id: internalId });
+			return {
+				framed: publicId !== undefined ? `${line}\n` : serializeJsonLine({ ...command, id: internalId }),
+				pending: { internalId, publicId, command: command.type },
+			};
 		} catch {
 			// The worker preserves the existing parse-error response contract.
-			return `${line}\n`;
+			return { framed: `${line}\n` };
 		}
+	};
+	const flushRpcInput = () => {
+		const input = currentRpcInput;
+		if (!input?.writable || rpcInputPaused) return;
+		while (currentRpcInput === input && input.writable && bufferedRpcInput.length > 0) {
+			const record = bufferedRpcInput.shift()!;
+			if (record.pending) {
+				const { internalId, publicId, command } = record.pending;
+				pendingRpcCommands.set(internalId, { publicId, command });
+			}
+			try {
+				if (!input.write(record.framed)) {
+					rpcInputPaused = true;
+					process.stdin.pause();
+					input.once("drain", () => {
+						if (currentRpcInput !== input) return;
+						rpcInputPaused = false;
+						flushRpcInput();
+						if (!rpcInputPaused && !stdinEnded) process.stdin.resume();
+					});
+					return;
+				}
+			} catch {
+				failCurrentInput?.();
+				return;
+			}
+		}
+		if (stdinEnded && currentRpcInput === input && bufferedRpcInput.length === 0) input.end();
 	};
 	const observeRpcOutput = (line: string) => {
 		let parsed: unknown;
@@ -320,24 +357,12 @@ export async function runOwnedSessionWorkerFrontend(
 
 	if (profile === "rpc") {
 		detachRpcInput = attachJsonlLineReader(process.stdin, (line) => {
-			const framed = prepareRpcInput(line);
-			const input = currentRpcInput;
-			if (input?.writable) {
-				if (!input.write(framed)) {
-					process.stdin.pause();
-					input.once("drain", () => {
-						if (currentRpcInput === input && !stdinEnded) {
-							process.stdin.resume();
-						}
-					});
-				}
-			} else {
-				bufferedRpcInput.push(framed);
-			}
+			bufferedRpcInput.push(prepareRpcInput(line));
+			flushRpcInput();
 		});
 		process.stdin.once("end", () => {
 			stdinEnded = true;
-			currentRpcInput?.end();
+			flushRpcInput();
 		});
 	}
 
@@ -370,6 +395,17 @@ export async function runOwnedSessionWorkerFrontend(
 				child.kill("SIGTERM");
 				throw new Error("Owned session worker did not expose bridged stdio");
 			}
+			const failInput = () => {
+				if (currentChild !== child || failedWorkerInputs.has(child)) return;
+				failedWorkerInputs.add(child);
+				if (currentRpcInput === childInput) currentRpcInput = undefined;
+				rpcInputPaused = false;
+				if (profile === "rpc" && !stdinEnded) process.stdin.resume();
+				if (childInput) process.stdin.unpipe(childInput);
+				forwardSignal(child, "SIGTERM");
+			};
+			childInput?.on("error", failInput);
+			failCurrentInput = failInput;
 			childError.pipe(process.stderr, { end: false });
 			if (profile === "rpc") {
 				if (!childInput) {
@@ -381,12 +417,8 @@ export async function runOwnedSessionWorkerFrontend(
 					childOutput.pause();
 				}
 				detachRpcOutput = attachJsonlLineReader(childOutput, observeRpcOutput);
-				for (const buffered of bufferedRpcInput.splice(0)) {
-					childInput.write(buffered);
-				}
-				if (stdinEnded) {
-					childInput.end();
-				}
+				rpcInputPaused = false;
+				flushRpcInput();
 			} else {
 				if (childInput) {
 					process.stdin.pipe(childInput);
@@ -423,13 +455,21 @@ export async function runOwnedSessionWorkerFrontend(
 			const workerStartedAt = Date.now();
 			const child = spawnWorker(workerArgs);
 			const workerPid = child.pid;
-			const exit = await new Promise<{ code: number; signal: NodeJS.Signals | null }>((resolveExit, reject) => {
-				child.once("error", reject);
+			let workerError: Error | undefined;
+			const exit = await new Promise<{ code: number; signal: NodeJS.Signals | null }>((resolveExit) => {
+				child.on("error", (error) => {
+					if (workerError) return;
+					workerError = error;
+					if (failCurrentInput) failCurrentInput();
+					else forwardSignal(child, "SIGTERM");
+				});
 				child.once("close", (code, signal) => resolveExit({ code: code ?? exitCodeForSignal(signal), signal }));
 			});
 			currentChild = undefined;
 			currentRpcInput = undefined;
 			currentRpcOutput = undefined;
+			failCurrentInput = undefined;
+			rpcInputPaused = false;
 			if (profile === "rpc" && !stdinEnded) {
 				process.stdin.resume();
 			}
@@ -441,7 +481,7 @@ export async function runOwnedSessionWorkerFrontend(
 			if (child.connected) {
 				child.disconnect();
 			}
-			const cleanupErrors: unknown[] = [];
+			const cleanupErrors: unknown[] = workerError ? [workerError] : [];
 			try {
 				reapWorkerResources(workerPid);
 			} catch (error) {
@@ -450,13 +490,17 @@ export async function runOwnedSessionWorkerFrontend(
 			const rpcCrashed =
 				profile === "rpc" &&
 				!terminating &&
-				(exit.code !== 0 || exit.signal !== null || pendingRpcCommands.size > 0);
-			const workerExitCode = rpcCrashed && exit.code === 0 ? 1 : exit.code;
+				(exit.code !== 0 ||
+					exit.signal !== null ||
+					failedWorkerInputs.has(child) ||
+					pendingRpcCommands.size > 0 ||
+					bufferedRpcInput.length > 0);
+			const workerExitCode = (rpcCrashed || failedWorkerInputs.has(child)) && exit.code === 0 ? 1 : exit.code;
 			if (Date.now() - workerStartedAt >= 60_000) {
 				recoveryAttempt = 0;
 			}
 			try {
-				if (rpcCrashed) failPendingRpcCommands();
+				if (profile === "rpc") failPendingRpcCommands();
 			} catch (error) {
 				if (!cleanupErrors.includes(error)) cleanupErrors.push(error);
 			}
@@ -480,6 +524,18 @@ export async function runOwnedSessionWorkerFrontend(
 			}
 		}
 	} finally {
+		for (const record of bufferedRpcInput) {
+			if (!record.pending) continue;
+			process.stdout.write(
+				serializeJsonLine({
+					...(record.pending.publicId !== undefined ? { id: record.pending.publicId } : {}),
+					type: "response",
+					command: record.pending.command,
+					success: false,
+					error: "The isolated session worker stopped before this command was sent",
+				}),
+			);
+		}
 		for (const { signal, handler } of signalHandlers) {
 			process.off(signal, handler);
 		}

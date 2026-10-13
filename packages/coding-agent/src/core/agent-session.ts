@@ -135,6 +135,7 @@ import {
 	shouldCompact,
 	takeNativeBranchSummaryWrite,
 } from "./compaction/index.js";
+import { type CompletionBlocker, observeCompletion } from "./completion.js";
 import {
 	appendContextEpoch,
 	CONTEXT_EPOCH_DETAIL,
@@ -1017,6 +1018,7 @@ type AutonomousRuntimeSnapshot = Pick<
 
 interface RlmChildRun {
 	id: string;
+	admission: RlmChildAdmission;
 	prompt: string;
 	sessionName: string;
 	sessionDir: string;
@@ -1151,11 +1153,14 @@ export function rlmChildLabel(prompt: string): string {
 	return prompt.replace(/\s+/g, " ").trim() || "child agent";
 }
 
-function readAssistantText(message: AssistantMessage): string {
-	return message.content
-		.filter((block) => block.type === "text")
-		.map((block) => block.text)
-		.join("");
+export function rlmAssistantPreview(message: AssistantMessage, maxLength = 160): string {
+	let suffix = "";
+	for (let index = message.content.length - 1; index >= 0 && suffix.length < 4096; index--) {
+		const block = message.content[index];
+		if (block.type === "text") suffix = block.text.slice(-(4096 - suffix.length)) + suffix;
+	}
+	const compact = suffix.replace(/\s+/g, " ").trim();
+	return compact.length <= maxLength ? compact : `...${compact.slice(-(maxLength - 3)).trimStart()}`;
 }
 
 function waitForPromiseOrAbort<T>(
@@ -1403,6 +1408,10 @@ export class AgentSession {
 	private readonly _initialGoal: AgentSessionConfig["initialGoal"];
 	private _initialization: Promise<void> | undefined;
 	private _goalResumeOperation: Promise<void> | undefined;
+	private _goalResumeRequested = false;
+	private _autonomousContinuationAwaitingRlmWork:
+		| { message: AssistantMessage; state: AutonomousRuntimeState; signal?: AbortSignal; isCurrent: () => boolean }
+		| undefined;
 	private readonly _rlmRunTasks = new Set<Promise<void>>();
 	private readonly _childUsageWrites = new Set<Promise<void>>();
 	private readonly _assistantEntryIds = new WeakMap<
@@ -2839,8 +2848,10 @@ export class AgentSession {
 			return false;
 		}
 		if (command.kind === "on") {
+			this._autonomousContinuationAwaitingRlmWork = undefined;
 			setAutonomousEnabled(this._autonomousState, true, { cwd: this._cwd });
 		} else if (command.kind === "off") {
+			this._autonomousContinuationAwaitingRlmWork = undefined;
 			setAutonomousEnabled(this._autonomousState, false);
 			this._clearQueuedAutonomousContinuations();
 		}
@@ -2906,30 +2917,44 @@ export class AgentSession {
 	}
 
 	private _scheduleGoalContinuationAfterRlmWork(): void {
-		if (this._goalResumeOperation || !this._goalContinuationAwaitsRlmWork) return;
+		if (!this._goalContinuationAwaitsRlmWork && !this._autonomousContinuationAwaitingRlmWork) return;
+		if (this._goalResumeOperation) {
+			this._goalResumeRequested = true;
+			return;
+		}
 		const operation = this._resumeGoalContinuationAfterRlmWork();
 		this._goalResumeOperation = operation;
 		void operation
 			.finally(() => {
 				if (this._goalResumeOperation === operation) this._goalResumeOperation = undefined;
 				this._notifySessionInputCheckpointChange();
+				if (this._goalResumeRequested) {
+					this._goalResumeRequested = false;
+					this._scheduleGoalContinuationAfterRlmWork();
+				}
 			})
 			.catch((error) => this._surfaceSessionInputError(error));
 	}
 
 	private async _resumeGoalContinuationAfterRlmWork(): Promise<void> {
-		if (!this._goalContinuationAwaitsRlmWork) return;
+		if (!this._goalContinuationAwaitsRlmWork && !this._autonomousContinuationAwaitingRlmWork) return;
 		if (
 			this._disposed ||
 			this._disposing ||
-			this._hasUnsettledRlmQuiescenceWork() ||
+			this._hasUnsettledRlmQuiescenceWork(true) ||
 			this._jobWatchController?.isParked()
 		)
 			return;
-		if (this._goals.state.status !== "active" || !this._goals.state.objective) {
+		if (
+			!this._goalContinuationAwaitsRlmWork ||
+			this._goals.state.status !== "active" ||
+			!this._goals.state.objective
+		) {
 			this._goalContinuationAwaitsRlmWork = false;
+			await this._resumeAutonomousContinuationAfterRlmWork();
 			return;
 		}
+		this._autonomousContinuationAwaitingRlmWork = undefined;
 		// Keep the deferral while admission is paused or the pump is suspended
 		// (post-abort); the pause release and resumeQueuedWork retry.
 		if (this._sessionInputAdmissionPauses.size > 0 || this._sessionInputPumpSuspended) return;
@@ -2947,6 +2972,10 @@ export class AgentSession {
 				{ continuationOwner: owner },
 			);
 			if (!this._isGoalContinuationOwnerCurrent(owner)) return;
+			if (this._hasUnsettledRlmQuiescenceWork(true)) {
+				await this._holdGoalContinuationAfterOwnedWorkAdmission(owner, goalBeforeResume);
+				return;
+			}
 			const message = createGoalContextMessage(owner.goal, "continuation");
 			const normalized = normalizeMessageContent(message.content);
 			// No front: a settling child's terminal notice must be read first.
@@ -2965,6 +2994,85 @@ export class AgentSession {
 			} catch (error) {
 				if (!(error instanceof StaleGoalContinuationError)) throw error;
 			}
+		}
+	}
+
+	private async _holdGoalContinuationAfterOwnedWorkAdmission(
+		owner: GoalContinuationOwner,
+		before: GoalState,
+	): Promise<void> {
+		await this._setGoalState(before, { continuationOwner: owner });
+		if (this._isGoalContinuationOwnerCurrent(owner)) {
+			this._goalContinuationAwaitsRlmWork = true;
+			// Settlement can precede the compensating write; do not lose that wake.
+			this._scheduleGoalContinuationAfterRlmWork();
+		}
+	}
+
+	private _deferAutonomousContinuationForRlmWork(message: AssistantMessage, signal?: AbortSignal): boolean {
+		if (
+			!this._autonomousState.enabled ||
+			message.stopReason === "error" ||
+			message.stopReason === "aborted" ||
+			!this._hasUnsettledRlmQuiescenceWork(true)
+		)
+			return false;
+		const owner = this._captureCompactionOwner(signal);
+		const state = this._autonomousState;
+		const arrivalEpoch = this._sessionInputArrivalEpoch;
+		this._autonomousContinuationAwaitingRlmWork = {
+			message,
+			state,
+			signal,
+			isCurrent: () =>
+				this._isCompactionSourceOwnerCurrent(owner) &&
+				!signal?.aborted &&
+				this._autonomousState === state &&
+				this._sessionInputArrivalEpoch === arrivalEpoch,
+		};
+		return true;
+	}
+
+	private async _resumeAutonomousContinuationAfterRlmWork(): Promise<void> {
+		const held = this._autonomousContinuationAwaitingRlmWork;
+		if (!held) return;
+		if (!held.isCurrent()) {
+			this._autonomousContinuationAwaitingRlmWork = undefined;
+			return;
+		}
+		if (
+			this._sessionInputAdmissionPauses.size > 0 ||
+			this._sessionInputPumpSuspended ||
+			this.isStreaming ||
+			this.unfinishedActionCount > 0
+		)
+			return;
+		const before = structuredClone(held.state);
+		const candidate = structuredClone(before);
+		const message = await nextAutonomousContinuation(candidate, held.message, {
+			cwd: this._cwd,
+			signal: held.signal,
+		});
+		if (
+			this._autonomousContinuationAwaitingRlmWork !== held ||
+			!held.isCurrent() ||
+			!isDeepStrictEqual(held.state, before)
+		)
+			return;
+		if (this._hasUnsettledRlmQuiescenceWork(true) || this._jobWatchController?.isParked()) return;
+		this._autonomousContinuationAwaitingRlmWork = undefined;
+		this._restoreAutonomousRuntimeSnapshot(candidate);
+		if (!message) return;
+		const normalized = normalizeMessageContent(message.content);
+		const admitted = this._admitSessionInput(
+			this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
+				message,
+				resumeIfIdle: true,
+			}),
+		);
+		if (!admitted.accepted) {
+			this._restoreAutonomousRuntimeSnapshot(before);
+			this._autonomousContinuationAwaitingRlmWork = held;
 		}
 	}
 
@@ -3876,6 +3984,7 @@ export class AgentSession {
 			this._jobWatchController?.isParked()
 		)
 			return undefined;
+		if (this._deferAutonomousContinuationForRlmWork(message, owner.signal)) return undefined;
 		const queued = this._queuedAutonomousThresholdContinuations.get(message);
 		if (queued && this._checkpointActionPending(queued)) return queued;
 		const { state, snapshot: original, arrivalEpoch, cwd } = capture;
@@ -3893,6 +4002,7 @@ export class AgentSession {
 		}
 		if (!current() || !this._contextOptimizationAllowed()) return undefined;
 		if (messageToQueue && this._sessionInputArrivalEpoch !== arrivalEpoch) return undefined;
+		if (this._deferAutonomousContinuationForRlmWork(message, owner.signal)) return undefined;
 		this._restoreAutonomousRuntimeSnapshot(candidate);
 		if (!messageToQueue) return undefined;
 		const normalized = normalizeMessageContent(messageToQueue.content);
@@ -3929,6 +4039,10 @@ export class AgentSession {
 		if (message.stopReason === "error" || message.stopReason === "aborted") return undefined;
 		if (owner.goal.status !== "active" || !owner.goal.objective || this._jobWatchController?.isParked())
 			return undefined;
+		if (this._hasUnsettledRlmQuiescenceWork(true)) {
+			this._goalContinuationAwaitsRlmWork = true;
+			return undefined;
+		}
 		const queued = this._queuedGoalThresholdContinuation;
 		if (queued && this._checkpointActionPending(queued)) return queued;
 		if (!this._goalContinuationHasProgress && message.stopReason !== "toolUse") return undefined;
@@ -3947,6 +4061,10 @@ export class AgentSession {
 			);
 			counted = true;
 			this._assertGoalContinuationOwner(owner);
+			if (this._hasUnsettledRlmQuiescenceWork(true)) {
+				await this._holdGoalContinuationAfterOwnedWorkAdmission(owner, before);
+				return undefined;
+			}
 			if (!this._contextOptimizationAllowed()) {
 				await this._setGoalState(before, { continuationOwner: owner });
 				return undefined;
@@ -4500,7 +4618,7 @@ export class AgentSession {
 		}
 		if (this._jobWatchController?.isParked()) return { kind: "wait_for_owned_work" };
 		// Delegating and ending the turn is correct behavior; retain the existing wakeup owner.
-		if (this._hasUnsettledRlmQuiescenceWork()) {
+		if (this._hasUnsettledRlmQuiescenceWork(true)) {
 			this._goalContinuationAwaitsRlmWork = true;
 			return { kind: "wait_for_owned_work" };
 		}
@@ -4508,6 +4626,7 @@ export class AgentSession {
 		if (!this._goalContinuationHasProgress) return { kind: "finish" };
 		try {
 			this._ensureGoalRuntimeActive(context.context);
+			const previousGoal = owner.goal;
 			const nextGoal = {
 				...owner.goal,
 				continuationsUsed: owner.goal.continuationsUsed + 1,
@@ -4516,6 +4635,10 @@ export class AgentSession {
 			};
 			await this._setGoalState(nextGoal, { continuationOwner: owner });
 			if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
+			if (this._hasUnsettledRlmQuiescenceWork(true)) {
+				await this._holdGoalContinuationAfterOwnedWorkAdmission(owner, previousGoal);
+				return { kind: "wait_for_owned_work" };
+			}
 			return { kind: "continue", messages: [createGoalContextMessage(owner.goal, "continuation")] };
 		} catch (error) {
 			if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
@@ -4568,6 +4691,10 @@ export class AgentSession {
 				this._goals.restoreAccountingClock(goalAccountingStartedAt);
 				return { kind: "finish" };
 			}
+			if (this._hasUnsettledRlmQuiescenceWork(true)) {
+				await this._holdGoalContinuationAfterOwnedWorkAdmission(owner, goalSnapshot);
+				return { kind: "wait_for_owned_work" };
+			}
 			return goalOutcome;
 		}
 		const noContinuation = (): AgentContinuationOutcome =>
@@ -4583,6 +4710,7 @@ export class AgentSession {
 			return noContinuation();
 		}
 		if (!autonomousOwnerIsCurrent()) return { kind: "finish" };
+		if (this._deferAutonomousContinuationForRlmWork(context.message, signal)) return { kind: "wait_for_owned_work" };
 		// Gate work may await. It must not mutate a new run's counters or failure state while it waits.
 		const candidate = structuredClone(autonomousSnapshot);
 		let autonomousMessage: AgentMessage | undefined;
@@ -4597,8 +4725,8 @@ export class AgentSession {
 		if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(signal);
 		if (!autonomousOwnerIsCurrent()) return { kind: "finish" };
 		if (autonomousMessage && this._sessionInputArrivalEpoch !== arrivalEpoch) return { kind: "finish" };
+		if (this._deferAutonomousContinuationForRlmWork(context.message, signal)) return { kind: "wait_for_owned_work" };
 		this._restoreAutonomousRuntimeSnapshot(candidate);
-		// Preserve the current policy winner: a goal deferral does not override autonomous continuation.
 		return autonomousMessage ? { kind: "continue", messages: [autonomousMessage] } : noContinuation();
 	}
 
@@ -4708,6 +4836,7 @@ export class AgentSession {
 	private _handleAgentEvent = (event: AgentEvent): void | Promise<void> => {
 		if (event.type === "agent_end" && event.refusal) this._invocationOutputRefused = true;
 		if (event.type === "agent_start") {
+			this._autonomousContinuationAwaitingRlmWork = undefined;
 			// Native input waits for its delivery ticket. Direct/generic Agent runs have actually started here.
 			if (
 				!this._actionStore
@@ -5227,6 +5356,7 @@ export class AgentSession {
 	 * the latest state reaches disk instead of racing process exit.
 	 */
 	async disposeAsync(options?: { kernelSnapshot?: boolean }): Promise<void> {
+		this._autonomousContinuationAwaitingRlmWork = undefined;
 		this._failedAutomaticCompaction = undefined;
 		this._failedThresholdCompaction = undefined;
 		this._contextCompiler.clear();
@@ -5449,6 +5579,7 @@ export class AgentSession {
 	}
 
 	dispose(): void {
+		this._autonomousContinuationAwaitingRlmWork = undefined;
 		this._failedAutomaticCompaction = undefined;
 		this._failedThresholdCompaction = undefined;
 		this._contextCompiler.clear();
@@ -5764,6 +5895,7 @@ export class AgentSession {
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
 		this._baseSystemPromptOptions = {
+			foregroundWaitMs: this.settingsManager.getForegroundWaitMs(),
 			cwd: this._cwd,
 			skills: loadedSkills,
 			nativeSkillSelection: nativeEpoch ? (this._nativeRecoveryEnabled() ? "enabled" : "unavailable") : undefined,
@@ -8171,6 +8303,11 @@ export class AgentSession {
 		const waiters = [...this._sessionInputCheckpointWaiters];
 		this._sessionInputCheckpointWaiters.clear();
 		for (const resolve of waiters) resolve();
+		const parent = this._rlmParentAdmission?.parent;
+		if (parent) {
+			parent._notifySessionInputCheckpointChange();
+			parent._scheduleGoalContinuationAfterRlmWork();
+		}
 	}
 
 	private _waitForSessionActivityChange(signal: AbortSignal): Promise<void> {
@@ -8422,7 +8559,12 @@ export class AgentSession {
 	 * waiter registered (a leaked waiter holds hasPendingAdmissionWaiters true and
 	 * blocks daemon passivation).
 	 */
-	private async _waitForIdleOrSettlement(settlement?: PostCompactionContinuationSettlement): Promise<void> {
+	private async _waitForIdleOrSettlement(
+		settlement?: PostCompactionContinuationSettlement,
+		signal?: AbortSignal,
+	): Promise<void> {
+		signal?.throwIfAborted();
+		const wait = <T>(work: Promise<T>) => observeCompletion(work, signal);
 		const owner = settlement?.resume.owner;
 		const current = () => !owner || this._isCompactionOwnerCurrent(owner);
 		while (current() && (settlement === undefined || this._postCompactionContinuationSettlement === settlement)) {
@@ -8436,7 +8578,7 @@ export class AgentSession {
 						this._sessionInputCheckpointWaiters.add(resolve);
 					});
 					try {
-						await (settlement ? Promise.race([changed, settlement.promise]) : changed);
+						await wait(settlement ? Promise.race([changed, settlement.promise]) : changed);
 					} finally {
 						this._sessionInputCheckpointWaiters.delete(wake);
 					}
@@ -8445,18 +8587,18 @@ export class AgentSession {
 				this._scheduleSessionInputPump();
 			}
 			const pump = this._sessionInputPump;
-			await pump;
+			await wait(pump ?? Promise.resolve());
 			if (!current()) return;
-			await (owner?.agent ?? this.agent).waitForIdle();
+			await wait((owner?.agent ?? this.agent).waitForIdle());
 			if (!current()) return;
 			const agentEventQueue = this._agentEventQueue;
-			await agentEventQueue;
+			await wait(agentEventQueue);
 			if (!current()) return;
 			const goalResumeOperation = this._goalResumeOperation;
-			await goalResumeOperation;
+			await wait(goalResumeOperation ?? Promise.resolve());
 			if (!current()) return;
 			const requestSettlement = (owner?.requests ?? this.requests).waitForIdle();
-			await (settlement ? Promise.race([requestSettlement, settlement.promise]) : requestSettlement);
+			await wait(settlement ? Promise.race([requestSettlement, settlement.promise]) : requestSettlement);
 			if (!current() || (settlement && this._postCompactionContinuationSettlement !== settlement)) return;
 			if (
 				pump === this._sessionInputPump &&
@@ -8473,16 +8615,52 @@ export class AgentSession {
 	}
 
 	/** Waits out any owned post-compaction continuation and rejects when one cannot start; {@link waitForIdle} never rejects. */
-	async waitForHeadlessIdle(): Promise<void> {
+	getCompletionBlockers(): CompletionBlocker[] {
+		const blockers: CompletionBlocker[] = [];
+		let omitted = 0;
+		const add = (sessionId: string, kind: string, count: number | boolean) => {
+			if (!count) return;
+			if (blockers.length < 31) blockers.push({ kind, sessionId, count: Number(count) });
+			else omitted++;
+		};
+		for (const session of this._rlmSubtreeSessions()) {
+			if (session._hasTerminalRlmQuiescenceFailure()) continue;
+			const id = session.sessionId;
+			add(id, "requests", session.requests.hasPending);
+			add(id, "ipython", session._pendingIpythonExecutions.size);
+			add(id, "continuation", session._goalResumeOperation !== undefined);
+			add(id, "streaming", session.isStreaming);
+			add(id, "compaction", session.isCompacting);
+			add(id, "retry", session.isRetrying);
+			add(id, "bash", session.isBashRunning);
+			add(id, "refinement", session._refineInFlight !== undefined);
+			add(id, "branch_summary", session._branchSummaryOperation !== undefined);
+			add(id, "post_compaction", session._postCompactionContinuationSettlement !== undefined);
+			add(id, "session_actions", session.unfinishedActionCount);
+			add(id, "parked_watches", session._jobWatchController?.isParked() ?? false);
+			add(id, "child_admission", session._pendingRlmChildAdmissionsForQuiescence().length);
+			add(id, "child_deletion", session._deletingRlmChildren.size);
+			add(id, "child_usage", session._childUsageWrites.size);
+			add(id, "terminal_notices", session._hasDeferredRlmTerminalNotices());
+			add(id, "child_runs", [...session._unsettledRlmChildRuns].filter((run) => !run.settled).length);
+		}
+		if (omitted) blockers.push({ kind: "omitted", count: omitted });
+		return blockers;
+	}
+
+	async waitForHeadlessIdle(signal?: AbortSignal): Promise<void> {
 		while (true) {
-			await this.waitForIdle();
+			await this._waitForIdleOrSettlement(undefined, signal);
 			if (this._pendingIpythonExecutions.size > 0) {
-				await Promise.all([...this._pendingIpythonExecutions.values()].map((pending) => pending.admitted));
+				await observeCompletion(
+					Promise.all([...this._pendingIpythonExecutions.values()].map((pending) => pending.admitted)),
+					signal,
+				);
 				continue;
 			}
 			const postCompactionContinuation = this._postCompactionContinuationSettlement?.promise;
 			if (!postCompactionContinuation) return;
-			await postCompactionContinuation;
+			await observeCompletion(postCompactionContinuation, signal);
 		}
 	}
 
@@ -8533,6 +8711,7 @@ export class AgentSession {
 	}
 
 	requestAbort(): void {
+		this._autonomousContinuationAwaitingRlmWork = undefined;
 		for (const run of [...this._unsettledRlmChildRuns]) {
 			if (run.status === "cancelled") this._abandonRlmRunForQuiescence(run);
 		}
@@ -8581,6 +8760,7 @@ export class AgentSession {
 	}
 
 	abortForUpdateRestart(): void {
+		this._autonomousContinuationAwaitingRlmWork = undefined;
 		// Cancel scheduled pumps and suspend new ones: queued inputs must survive
 		// into the restart manifest instead of starting a turn during teardown.
 		this._sessionInputPumpRequested = false;
@@ -9174,7 +9354,10 @@ export class AgentSession {
 			const { model, thinkingLevel } = selected;
 			const settings = { ...this.settingsManager.getCompactionSettings() };
 			const semanticEdges = owner.semanticEdges;
-			compaction = owner.manager.bindCompactionSink();
+			compaction = owner.manager.bindCompactionSink(undefined, () => {
+				if (abort.signal.aborted) throw new CompactionCancelledError();
+				this._assertCompactionOwner(owner);
+			});
 			requests = owner.requests.capture(compaction);
 			this._assertCompactionOwner(owner);
 			const { apiKey, headers } = await this._getRequiredRequestAuth(model);
@@ -11027,7 +11210,10 @@ export class AgentSession {
 			const thinkingLevel = selected?.thinkingLevel ?? this.thinkingLevel;
 			const settings = { ...this.settingsManager.getCompactionSettings() };
 			const semanticEdges = owner.semanticEdges;
-			compaction = owner.manager.bindCompactionSink();
+			compaction = owner.manager.bindCompactionSink(undefined, () => {
+				if (abort.signal.aborted) throw new CompactionCancelledError();
+				this._assertCompactionOwner(owner);
+			});
 			requests = owner.requests.capture(compaction);
 			this._assertCompactionOwner(owner);
 			const authResult = model ? await this._modelRegistry.getApiKeyAndHeaders(model) : undefined;
@@ -11546,6 +11732,7 @@ export class AgentSession {
 			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
 				prime_context: { recover: (input, signal) => this.recoverNativeHistory(input, signal) },
 				ipython: {
+					foregroundWaitMs: this.settingsManager.getForegroundWaitMs(),
 					captureNativeRecoveryScope: () => {
 						const producer = this._nativeRecoveryProducer.getStore();
 						return producer ? (run) => this._nativeRecoveryProducer.run(producer, run) : undefined;
@@ -12265,6 +12452,7 @@ export class AgentSession {
 		const settlement = createAgentMessageDeferred();
 		let child: AgentSession | undefined;
 		let settled = false;
+		let settlementComplete = false;
 		let factoryClaimed = false;
 		let unboundCleanupComplete = true;
 		let capacity: RlmSubagentCapacityReservation | undefined;
@@ -12286,7 +12474,7 @@ export class AgentSession {
 			},
 			settlement: settlement.promise,
 			get pending() {
-				return !settled;
+				return !settlementComplete;
 			},
 			assertCurrent: () => {
 				controller.signal.throwIfAborted();
@@ -12330,7 +12518,10 @@ export class AgentSession {
 				try {
 					await release();
 				} finally {
+					settlementComplete = true;
 					settlement.resolve();
+					this._notifySessionInputCheckpointChange();
+					this._scheduleGoalContinuationAfterRlmWork();
 				}
 			},
 			cancel: (reason) => {
@@ -12395,7 +12586,6 @@ export class AgentSession {
 		options: CreateRlmSubagentRuntimeOptions & { admission: RlmChildAdmission },
 	): Promise<RlmSubagentRuntime> {
 		options.admission.assertCurrent();
-		options.admission.beginSetup();
 		if (this._subagentRuntimeHost) {
 			return await this._subagentRuntimeHost.createRlmSubagentRuntime(options);
 		}
@@ -12413,6 +12603,10 @@ export class AgentSession {
 		const childSessionManager = await SessionManager.create(this._cwd, options.sessionDir, {
 			parentSession: parentSessionFile,
 			rlmDepth: options.rlmDepth,
+		}).catch(async (error: unknown) => {
+			// A compound creation/cleanup failure still owns its resources.
+			if (!(error instanceof AggregateError)) await options.admission.confirmUnboundCleanup();
+			throw error;
 		});
 		let child: AgentSession | undefined;
 		try {
@@ -12779,6 +12973,8 @@ export class AgentSession {
 			const clearReservation = () => {
 				if (this._deletingRlmChildren.get(subagent.rlm_child_id)?.promise === deletion) {
 					this._deletingRlmChildren.delete(subagent.rlm_child_id);
+					this._notifySessionInputCheckpointChange();
+					this._scheduleGoalContinuationAfterRlmWork();
 				}
 			};
 			const run = this._activeRlmChildRuns.get(subagent.rlm_child_id);
@@ -13034,9 +13230,35 @@ export class AgentSession {
 		onUsageWrite?: (write: Promise<void>) => void,
 	): () => void {
 		let runningToolCount = 0;
+		let previewTimer: ReturnType<typeof setTimeout> | undefined;
+		let pendingPreview: AssistantMessage | undefined;
+		let active = true;
+		let generation = 0;
+		let parentOwner = this._captureCompactionOwner();
+		let childOwner = child._captureCompactionOwner();
+		const current = () =>
+			active &&
+			this._isCompactionSourceOwnerCurrent(parentOwner) &&
+			child._isCompactionSourceOwnerCurrent(childOwner);
+		const clearPreview = () => {
+			if (previewTimer) clearTimeout(previewTimer);
+			previewTimer = undefined;
+		};
 		const emitChildUpdate = () => {
+			clearPreview();
+			if (!current()) return;
+			if (run && pendingPreview) {
+				const text = rlmAssistantPreview(pendingPreview);
+				if (text) run.answerPreview = text;
+			}
+			pendingPreview = undefined;
 			if (run) run.emitUpdate?.();
 			else this._emit({ type: "rlm_child_update", child: this._rlmChildSnapshotForSession(childId, child) });
+		};
+		const schedulePreview = (message: AssistantMessage) => {
+			pendingPreview = message;
+			previewTimer ??= setTimeout(emitChildUpdate, 1000);
+			previewTimer.unref();
 		};
 		const attributeUsage = (usage: Usage, origin: RlmChildUsageOrigin): Promise<void> => {
 			const source = this._rlmChildUsageSources.get(childId);
@@ -13061,23 +13283,35 @@ export class AgentSession {
 				});
 			this._childUsageWrites.add(write);
 			onUsageWrite?.(write);
-			void write.then(
-				() => this._childUsageWrites.delete(write),
-				(error) => {
-					this._childUsageWrites.delete(write);
-					if (run) run.error = `Child usage attribution was not acknowledged: ${this._asError(error).message}`;
-					this._surfaceSessionInputError(error);
-				},
-			);
+			const settled = () => {
+				this._childUsageWrites.delete(write);
+				this._notifySessionInputCheckpointChange();
+				this._scheduleGoalContinuationAfterRlmWork();
+			};
+			void write.then(settled, (error) => {
+				if (run) run.error = `Child usage attribution was not acknowledged: ${this._asError(error).message}`;
+				this._surfaceSessionInputError(error);
+				settled();
+			});
 			return write;
 		};
 		child._rlmParentUsageAttribution = attributeUsage;
 		const unsubscribe = child.subscribe((event) => {
+			if (!active) return;
+			if (!current()) {
+				generation++;
+				clearPreview();
+				pendingPreview = undefined;
+				parentOwner = this._captureCompactionOwner();
+				childOwner = child._captureCompactionOwner();
+			}
 			if (event.type === "rlm_child_update") {
 				this._emit(event);
 				return;
 			}
 			if (event.type === "agent_start") {
+				generation++;
+				pendingPreview = undefined;
 				if (run) run.activity = { kind: "waiting" };
 				emitChildUpdate();
 			} else if (event.type === "agent_end") {
@@ -13091,11 +13325,15 @@ export class AgentSession {
 						errorMessage: assistant.errorMessage,
 					};
 				}
+				const completedGeneration = generation;
 				const update = () => {
-					const text = compactRlmText(readAssistantText(assistant));
+					if (!current() || completedGeneration !== generation) return;
+					pendingPreview = undefined;
+					const text = rlmAssistantPreview(assistant);
 					if (run && text) run.answerPreview = text;
 					emitChildUpdate();
 				};
+				update();
 				if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
 					const messages = child.messages;
 					const precedingPrompt = messages
@@ -13113,15 +13351,12 @@ export class AgentSession {
 								: "agent_message"
 							: "direct_user";
 					void attributeUsage(assistant.usage, origin).then(update, () => {});
-				} else update();
+				}
 			} else if (event.type === "message_start" || event.type === "message_update") {
 				if (event.message.role === "assistant") {
-					if (run) {
-						const text = compactRlmText(readAssistantText(event.message));
-						if (text) run.answerPreview = text;
-						run.activity = { kind: "writing" };
-					}
-					emitChildUpdate();
+					if (event.type === "message_start") generation++;
+					if (run) run.activity = { kind: "writing" };
+					schedulePreview(event.message);
 				}
 			} else if (event.type === "tool_execution_start") {
 				if (run) {
@@ -13139,6 +13374,9 @@ export class AgentSession {
 			} else if (event.type === "session_info_changed" || event.type === "recap_update") emitChildUpdate();
 		});
 		return () => {
+			active = false;
+			clearPreview();
+			pendingPreview = undefined;
 			unsubscribe();
 			if (child._rlmParentUsageAttribution === attributeUsage) child._rlmParentUsageAttribution = undefined;
 		};
@@ -13251,9 +13489,11 @@ export class AgentSession {
 				: child.messages;
 		for (const message of messages) {
 			if (message.role !== "assistant") continue;
-			const text = compactRlmText(readAssistantText(message));
-			if (text) answerPreview = text;
 			toolUseCount += message.content.filter((block) => block.type === "toolCall").length;
+		}
+		for (let index = messages.length - 1; index >= 0 && !answerPreview; index--) {
+			const message = messages[index];
+			if (message.role === "assistant") answerPreview = rlmAssistantPreview(message) || undefined;
 		}
 		return {
 			id: childId,
@@ -13319,10 +13559,17 @@ export class AgentSession {
 		return snapshots;
 	}
 
+	private _pendingRlmChildAdmissionsForQuiescence(): RlmChildAdmission[] {
+		const abandoned = new Set(
+			[...this._activeRlmChildRuns.values()].filter((run) => run.abandonedForQuiescence).map((run) => run.admission),
+		);
+		return [...this._rlmChildAdmissions].filter((admission) => admission.pending && !abandoned.has(admission));
+	}
+
 	/** True when any direct or nested subagent is still running or queued. */
 	hasRunningRlmChildren(): boolean {
 		for (const session of this._rlmSubtreeSessions()) {
-			for (const admission of session._rlmChildAdmissions) if (admission.pending) return true;
+			if (session._pendingRlmChildAdmissionsForQuiescence().length > 0) return true;
 			for (const run of session._activeRlmChildRuns.values()) {
 				if (run.status === "running" || run.status === "queued") {
 					return true;
@@ -13370,6 +13617,7 @@ export class AgentSession {
 		if (this._hasTerminalRlmQuiescenceFailure()) return false;
 		if (this._jobWatchController?.isParked()) return true;
 		if (waitForOwnedChildDeletion && this._deletingRlmChildren.size > 0) return true;
+		if (this._pendingRlmChildAdmissionsForQuiescence().length > 0) return true;
 		if (this.requests.hasPending || this._pendingIpythonExecutions.size > 0 || this._childUsageWrites.size > 0)
 			return true;
 		if (this._hasDeferredRlmTerminalNotices()) return true;
@@ -13388,8 +13636,9 @@ export class AgentSession {
 	 */
 	async waitForRlmQuiescence(
 		externalSignal?: AbortSignal,
-		options: { waitForOwnedChildDeletion?: boolean } = {},
+		options: { waitForOwnedChildDeletion?: boolean; signal?: AbortSignal } = {},
 	): Promise<void> {
+		externalSignal ??= options.signal;
 		const cancellation = new AbortController();
 		const cancelFromParent = () => cancellation.abort();
 		if (externalSignal?.aborted) cancellation.abort();
@@ -13420,7 +13669,7 @@ export class AgentSession {
 		releaseForTerminalFailure();
 		try {
 			while (true) {
-				await wait(this.waitForHeadlessIdle());
+				await wait(this.waitForHeadlessIdle(cancellation.signal));
 				if (cancellation.signal.aborted) throw cancellationError();
 				// Strong RLM quiescence also owns work that interactive waitForIdle ignores.
 				if (this.isSessionActive || this._hasDeferredRlmTerminalNotices() || this._jobWatchController?.isParked()) {
@@ -13436,6 +13685,7 @@ export class AgentSession {
 					return;
 				await wait(
 					Promise.all([
+						...this._pendingRlmChildAdmissionsForQuiescence().map((admission) => admission.settlement),
 						...unsettledRuns.map((run) => run.settlement.promise),
 						...this._childUsageWrites,
 						...deletions,
@@ -13659,14 +13909,10 @@ export class AgentSession {
 				throw new Error(formatAgentSessionNameUnavailable(requestedSessionName, this._rlmDepth + 1));
 			}
 			this._pendingRlmSubagentSessionNames.add(requestedSessionName);
+			void admission.settlement.then(() => this._pendingRlmSubagentSessionNames.delete(requestedSessionName));
 		}
-		let modelSelection: RlmSubagentModelSelection;
-		try {
-			if (requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(requestedSessionName, true);
-			modelSelection = await this._resolveRlmSubagentModel(requestedModel);
-		} finally {
-			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
-		}
+		if (requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(requestedSessionName, true);
+		const modelSelection = await this._resolveRlmSubagentModel(requestedModel);
 		admission.assertCurrent();
 		if (requestedThinkingLevel !== undefined) {
 			const supported = getSupportedThinkingLevels(modelSelection.model) as ThinkingLevel[];
@@ -13688,6 +13934,7 @@ export class AgentSession {
 		let usageSettlement: Promise<void> = Promise.resolve();
 		const run: RlmChildRun = {
 			id: childNodeId,
+			admission,
 			prompt,
 			sessionName,
 			sessionDir: childSessionDir,
@@ -14661,7 +14908,9 @@ export class AgentSession {
 		await this._invalidatePendingAutoRefineForBranchChange();
 		if (this._disposing || this._disposed) throw new Error("Cannot navigate a disposing or disposed session.");
 
-		this._branchSummaryAbortController = new AbortController();
+		const abort = new AbortController();
+		const cancelled = new Error("Branch navigation cancelled");
+		this._branchSummaryAbortController = abort;
 		let resolveBranchSummaryOperation: () => void = () => {};
 		const branchSummaryOperation = new Promise<void>((resolve) => {
 			resolveBranchSummaryOperation = resolve;
@@ -14676,8 +14925,11 @@ export class AgentSession {
 				if (source.sessionId !== this.sessionId || source.sessionFile !== this.sessionFile)
 					throw new Error("Session source changed during branch navigation");
 			};
-			assertSource();
-			if (this._branchSummaryAbortController.signal.aborted) return { cancelled: true, aborted: true };
+			const assertOperationCurrent = () => {
+				assertSource();
+				if (abort.signal.aborted) throw cancelled;
+			};
+			assertOperationCurrent();
 			const [oldPath, targetPath] = captured.branches;
 			if (!oldPath || !targetPath) throw new Error("Captured navigation paths are unavailable");
 			const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(oldPath, targetPath);
@@ -14728,6 +14980,7 @@ export class AgentSession {
 			}
 
 			assertSource();
+			if (this._branchSummaryAbortController.signal.aborted) return { cancelled: true, aborted: true };
 			let summaryText: string | undefined;
 			let nativeBranchSummary: BranchSummaryResult | undefined;
 			let summaryDetails: unknown;
@@ -14794,23 +15047,36 @@ export class AgentSession {
 
 			await this.sessionManager.flushNow();
 			assertSource();
+			if (this._branchSummaryAbortController.signal.aborted) return { cancelled: true, aborted: true };
 			let summaryEntry: BranchSummaryEntry | undefined;
 			if (summaryText) {
 				const manager = this.sessionManager;
 				const write = !fromExtension ? takeNativeBranchSummaryWrite(nativeBranchSummary, summaryText) : undefined;
-				const pending = write?.(manager, newLeafId, summaryText, summaryDetails, summaryUsage);
+				const pending = write?.(
+					manager,
+					newLeafId,
+					summaryText,
+					summaryDetails,
+					summaryUsage,
+					assertOperationCurrent,
+				);
 				const summaryId =
 					(pending ? await pending : undefined) ??
-					(await manager.branchWithSummary(newLeafId, summaryText, summaryDetails, fromExtension, summaryUsage));
+					(await manager.branchWithSummary(
+						newLeafId,
+						summaryText,
+						summaryDetails,
+						fromExtension,
+						summaryUsage,
+						assertOperationCurrent,
+					));
 				summaryEntry = (await this.sessionManager.readEntry(summaryId)) as BranchSummaryEntry;
 
 				if (label) {
 					await this.sessionManager.appendLabelChange(summaryId, label);
 				}
-			} else if (newLeafId === null) {
-				await this.sessionManager.branchTo(null);
 			} else {
-				await this.sessionManager.branchTo(newLeafId);
+				await this.sessionManager.branchTo(newLeafId, assertOperationCurrent);
 			}
 
 			if (label && !summaryText) {
@@ -14838,6 +15104,9 @@ export class AgentSession {
 			});
 
 			return { editorText, cancelled: false, summaryEntry };
+		} catch (error) {
+			if (error === cancelled) return { cancelled: true, aborted: true };
+			throw error;
 		} finally {
 			this._branchSummaryAbortController = undefined;
 			if (this._branchSummaryOperation === branchSummaryOperation) {

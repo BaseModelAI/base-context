@@ -1,9 +1,12 @@
 import type { Socket } from "node:net";
 import { PassThrough } from "node:stream";
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import { fauxAssistantMessage, fauxToolCall } from "@ponythewhite/base-context-ai";
+import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
+import { retainToolOutput } from "../../../src/core/retained-tool-output.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../../../src/modes/daemon/active-session-state.js";
-import { AgentDaemon } from "../../../src/modes/daemon/daemon-mode.js";
+import { AgentDaemon, markClientSnapshotStreaming } from "../../../src/modes/daemon/daemon-mode.js";
 import {
 	DAEMON_PROTOCOL_INFO,
 	type DaemonAttachResult,
@@ -19,6 +22,7 @@ import {
 import { SnapshotTranscriptCache } from "../../../src/modes/daemon/snapshot-transcript-cache.js";
 import { type PrivateFrame, PrivateFrameDecoder } from "../../../src/modes/session-worker/private-framing.js";
 import { seedSupervisorRoster } from "../../fixtures/roster-seed.js";
+import { createHarness } from "../harness.js";
 
 const activeSessionId = "active-4602";
 const snapshotId = "snapshot-4602";
@@ -172,6 +176,158 @@ function snapshotFrames(messages: AgentMessage[]) {
 }
 
 describe("ENG-4602 snapshot transfer containment", () => {
+	it.each(["attach", "replacement", "catchup"] as const)(
+		"keeps a fresh %s snapshot valid when canonical context changes at the same cursor",
+		async (purpose) => {
+			const harness = await createHarness({
+				persistSession: true,
+				tools: [
+					{
+						name: "retained",
+						label: "Retained output",
+						description: "Return a retained tool result",
+						parameters: Type.Object({}),
+						execute: async () => ({
+							content: [{ type: "text", text: "retained tool output" }],
+							details: {
+								retainedOutput: await retainToolOutput(harness.tempDir, ["retained tool output"], true),
+							},
+						}),
+					},
+				],
+			});
+			const daemon = new AgentDaemon(`${harness.tempDir}/worker.sock`, {
+				defaultSessionConfig: { agentDir: harness.tempDir, cwd: harness.tempDir },
+				createRuntime: async () => {
+					throw new Error("unexpected runtime creation");
+				},
+			});
+			const supervisor = new DaemonSupervisor(`${harness.tempDir}/supervisor.sock`, {
+				defaultSessionConfig: { agentDir: harness.tempDir, cwd: harness.tempDir },
+				descriptorDir: `${harness.tempDir}/supervisor-state`,
+			});
+			const { close, worker } = workerHarness();
+			const supervisorInternals = supervisor as unknown as {
+				handleWorkerFrame(worker: WorkerHarness, frame: PrivateFrame<DaemonWorkerFrameHeader>): void;
+				handleWorkerClose: ReturnType<typeof vi.fn>;
+			};
+			supervisorInternals.handleWorkerClose = vi.fn(async () => {});
+			const state = {
+				activeSessionId,
+				eventGeneration: "generation-4602",
+				lastEventSequence: 0,
+				pendingAttaches: 0,
+				clients: new Set<DaemonSocketClient>(),
+				runtime: {
+					metadata: { kind: "top-level", createdAt: 1 },
+					diagnostics: [],
+					session: harness.session,
+				},
+			} as unknown as ActiveSessionState;
+			const socket = new PassThrough();
+			const client = { ...socketClient("supervisor", socket), transport: "private-framed" } as DaemonSocketClient;
+			const records: DaemonOutbound[] = [];
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				getOrHydrateBoundSessionState: ReturnType<typeof vi.fn>;
+				adoptClientEnv: ReturnType<typeof vi.fn>;
+				buildRlmChildSnapshotsWithPassiveRlmSubagents: ReturnType<typeof vi.fn>;
+				createConnectionState(state: ActiveSessionState): Promise<DaemonAttachResult["snapshot"]["state"]>;
+				observeRosterEvent: ReturnType<typeof vi.fn>;
+				writeWorkerSnapshotRecord: ReturnType<typeof vi.fn>;
+				writeWorkerSnapshotBuffer: ReturnType<typeof vi.fn>;
+				handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+				broadcastToSession(state: ActiveSessionState, message: DaemonOutbound): void;
+				prepareReplacementSnapshot(
+					client: DaemonSocketClient,
+					state: ActiveSessionState,
+					message: Extract<DaemonOutbound, { type: "session_replaced" }>,
+					signal: AbortSignal,
+				): Promise<void>;
+				queueClientCatchup(client: DaemonSocketClient, activeSessionId: string): void;
+				catchUpBackpressuredClient(client: DaemonSocketClient): Promise<void>;
+			};
+			internals.sessions.set(activeSessionId, state);
+			state.clients.add(client);
+			internals.getOrHydrateBoundSessionState = vi.fn(async () => state);
+			internals.adoptClientEnv = vi.fn();
+			internals.buildRlmChildSnapshotsWithPassiveRlmSubagents = vi.fn(async () => []);
+			internals.observeRosterEvent = vi.fn();
+			internals.writeWorkerSnapshotRecord = vi.fn(async (_client, message: DaemonOutbound) => {
+				records.push(message);
+				supervisorInternals.handleWorkerFrame(worker, frame(message));
+				return true;
+			});
+			internals.writeWorkerSnapshotBuffer = vi.fn(async (_client, buffer: Buffer, message: DaemonOutbound) => {
+				records.push(JSON.parse(buffer.toString("utf8")) as DaemonOutbound);
+				supervisorInternals.handleWorkerFrame(worker, { ...frame(message), payload: buffer });
+				return true;
+			});
+			const capture = async (kind: typeof purpose = "attach") => {
+				if (kind === "attach") {
+					await internals.handleCommand(client, {
+						type: "attach",
+						activeSessionId,
+						capabilities: ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"],
+					});
+				} else if (kind === "replacement") {
+					await internals.prepareReplacementSnapshot(
+						client,
+						state,
+						{
+							type: "session_replaced",
+							activeSessionId,
+							state: await internals.createConnectionState(state),
+							messages: [],
+						},
+						markClientSnapshotStreaming(client, activeSessionId),
+					);
+				} else {
+					internals.queueClientCatchup(client, activeSessionId);
+					await internals.catchUpBackpressuredClient(client);
+				}
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				await client.snapshotTransferTails?.get(activeSessionId);
+			};
+			const unsubscribe = harness.session.subscribe(async (event) => {
+				internals.broadcastToSession(state, { type: "session_event", activeSessionId, event });
+				if (event.type === "turn_start" && harness.session.messages.at(-1)?.role === "toolResult") await capture();
+			});
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("retained", {}), { stopReason: "toolUse" }),
+				async () => {
+					await capture(purpose);
+					return fauxAssistantMessage("done");
+				},
+			]);
+			try {
+				await harness.session.prompt("working context");
+				const begins = records.filter((record) => record.type === "session_snapshot_begin");
+				const chunks = records.filter((record) => record.type === "session_snapshot_chunk");
+				expect(begins).toHaveLength(2);
+				expect(begins[1]!.snapshot.lastEventCursor).toEqual(begins[0]!.snapshot.lastEventCursor);
+				expect(begins[1]!.messageCount).toBe(begins[0]!.messageCount);
+				const beforeTool = chunks[0]!.messages.find((message) => message.role === "toolResult");
+				const afterTool = chunks[1]!.messages.find((message) => message.role === "toolResult");
+				expect(JSON.stringify(beforeTool)).not.toContain("Read retained output with prime_context");
+				expect(JSON.stringify(afterTool)).toContain("Read retained output with prime_context");
+				expect(chunks.map((chunk) => chunk.snapshotId)).toEqual(begins.map((begin) => begin.snapshotId));
+				expect(
+					close,
+					supervisorInternals.handleWorkerClose.mock.calls.map(([, , error]) => String(error)).join("\n"),
+				).not.toHaveBeenCalled();
+				expect(begins[1]!.snapshotId).not.toBe(begins[0]!.snapshotId);
+				const transcript = worker.transcriptCaches.get(activeSessionId);
+				expect(transcript?.complete).toBe(true);
+				expect(JSON.parse(transcript!.readChunk(0).toString("utf8")).messages).toEqual(chunks[1]!.messages);
+			} finally {
+				unsubscribe();
+				socket.destroy();
+				for (const transcript of worker.transcriptCaches.values()) transcript.dispose();
+				await harness.cleanup();
+			}
+		},
+	);
 	it("keeps snapshot cursors stable when an event arrives during async summary reads", async () => {
 		const daemon = new AgentDaemon("/tmp/eng-4602-snapshot-cursor.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
@@ -269,9 +425,11 @@ describe("ENG-4602 snapshot transfer containment", () => {
 			expect(
 				begin.map((record) => [record.snapshotId, record.snapshot.lastEventSequence, record.messageCount]),
 			).toEqual([
-				[`${activeSessionId}-generation-4602-1`, 1, 1],
-				[`${activeSessionId}-generation-4602-2`, 2, 2],
+				[expect.any(String), 1, 1],
+				[expect.any(String), 2, 2],
 			]);
+			expect(begin[0]!.snapshotId).toBe(response.data.snapshotStream?.id);
+			expect(begin[1]!.snapshotId).not.toBe(begin[0]!.snapshotId);
 			expect(response.data).toMatchObject({
 				lastEventSequence: 1,
 				lastEventCursor: { generation: "generation-4602", sequence: 1 },

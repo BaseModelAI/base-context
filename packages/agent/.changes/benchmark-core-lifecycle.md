@@ -1,0 +1,2 @@
+- Fixed tool completion returning before accepted progress updates settled after a listener failure, while preserving the actual execution outcome.
+- Fixed incomplete proxy streams hanging instead of reporting a terminal error.

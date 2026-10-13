@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.js";
 import type { KernelBootstrapProgressHandler } from "../src/core/kernel/bootstrap.js";
 import {
+	createDeferred,
 	type ExecuteResult,
 	KernelBusyAfterInterruptError,
 	type KernelClient,
@@ -122,13 +123,15 @@ describe("IpythonKernelProvisioner", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.useRealTimers();
 		if (tempDir) {
 			rmSync(tempDir, { recursive: true, force: true });
 			tempDir = "";
 		}
 	});
 
-	it("does not surface a failed startup before the kernel's final snapshot flush finished", async () => {
+	it("does not overwrite the last usable snapshot after bootstrap failure", async () => {
 		const marker = join(tempDir, "snapshot-flushed");
 		const snapshotDir = join(tempDir, "snapshots");
 		mkdirSync(snapshotDir, { recursive: true });
@@ -136,12 +139,161 @@ describe("IpythonKernelProvisioner", () => {
 		const provisioner = new IpythonKernelProvisioner(tempDir, { python, snapshotDir });
 		try {
 			await expect(provisioner.ensure()).rejects.toThrow(/Failed to initialize rlm runtime/);
-			// The failed kernel's teardown (final snapshot flush included) completed
-			// before the failure surfaced, so a replacement provisioner gated on this
-			// one cannot race the still-flushing kernel over the same snapshot files.
-			expect(existsSync(marker)).toBe(true);
+			expect(existsSync(marker)).toBe(false);
+			expect(provisioner.hasRunningKernel).toBe(false);
 		} finally {
 			await provisioner.dispose();
+		}
+	});
+
+	it("blocks replacement after a rejected ready gate or failed startup cleanup", async () => {
+		const start = vi.spyOn(ReplKernelManager.prototype, "start").mockResolvedValue();
+		const gate = createDeferred<void>();
+		const gated = new IpythonKernelProvisioner(tempDir, { readyGate: gate.promise });
+		const waiting = gated.ensure();
+		gate.reject(new Error("old teardown failed"));
+		await expect(waiting).rejects.toThrow("old teardown failed");
+		expect(start).not.toHaveBeenCalled();
+
+		vi.spyOn(ReplKernelManager.prototype, "execute").mockRejectedValue(new Error("bootstrap failed"));
+		vi.spyOn(ReplKernelManager.prototype, "shutdown").mockRejectedValue(new Error("cleanup failed"));
+		const provisioner = new IpythonKernelProvisioner(tempDir);
+		await expect(provisioner.ensure()).rejects.toThrow("startup and cleanup failed");
+		await expect(provisioner.ensure()).rejects.toThrow("replacement startup blocked");
+		await expect(provisioner.dispose()).rejects.toThrow("replacement startup blocked");
+		expect(start).toHaveBeenCalledOnce();
+	});
+
+	it("suppresses session-cleanup snapshots until initial bootstrap completes", async () => {
+		const marker = join(tempDir, "snapshot-flushed");
+		const startedPath = join(tempDir, "execute-started");
+		const python = writeFakeReplRuntime(marker, {
+			gatedExecute: { startedPath, gatePath: join(tempDir, "execute-gate") },
+		});
+		const sessionId = `initial-bootstrap-${Date.now()}`;
+		const provisioner = new IpythonKernelProvisioner(tempDir, {
+			python,
+			sessionId,
+			snapshotDir: join(tempDir, "snapshots"),
+		});
+		const startup = provisioner.ensure();
+		const outcome = startup.catch((error: unknown) => error);
+		await vi.waitFor(() => expect(existsSync(startedPath)).toBe(true));
+		cleanupSessionResources(sessionId);
+		expect(await outcome).toBeInstanceOf(Error);
+		await provisioner.dispose();
+		expect(existsSync(marker)).toBe(false);
+	});
+
+	it("joins physical kill before admitting one replacement startup", async () => {
+		const stopped = createDeferred<void>();
+		const kill = vi.fn(() => stopped.promise);
+		const previous = { kill } as unknown as KernelClient;
+		const replacement = { shutdown: vi.fn(async () => true) } as unknown as KernelClient;
+		const provisioner = new IpythonKernelProvisioner(tempDir);
+		Reflect.set(provisioner, "managerPromise", Promise.resolve(previous));
+		const start = vi
+			.spyOn(provisioner as unknown as { startKernel(): Promise<KernelClient> }, "startKernel")
+			.mockResolvedValue(replacement);
+		const teardown = provisioner.kill();
+		const first = provisioner.ensure();
+		const second = provisioner.ensure();
+		await Promise.resolve();
+		expect(kill).toHaveBeenCalledTimes(1);
+		expect(start).not.toHaveBeenCalled();
+		stopped.resolve();
+		await teardown;
+		expect(await first).toBe(replacement);
+		expect(await second).toBe(replacement);
+		expect(start).toHaveBeenCalledTimes(1);
+		await provisioner.dispose();
+	});
+
+	it("shares disposal completion and never restarts a disposed provisioner", async () => {
+		const stopped = createDeferred<boolean>();
+		const shutdown = vi.fn(() => stopped.promise);
+		const provisioner = new IpythonKernelProvisioner(tempDir);
+		Reflect.set(provisioner, "managerPromise", Promise.resolve({ shutdown }));
+		const first = provisioner.dispose({ snapshot: false });
+		const second = provisioner.dispose();
+		expect(second).toBe(first);
+		let finished = false;
+		void second.then(() => {
+			finished = true;
+		});
+		await Promise.resolve();
+		expect(finished).toBe(false);
+		expect(shutdown).toHaveBeenCalledTimes(1);
+		expect(shutdown).toHaveBeenCalledWith({ snapshot: false, drainHostRequests: true });
+		await expect(provisioner.ensure()).rejects.toThrow("Python execution aborted");
+		stopped.resolve(true);
+		await Promise.all([first, second]);
+		expect(finished).toBe(true);
+	});
+
+	it.each(["restore", "bootstrap"] as const)("bounds initial %s and joins cleanup before retry", async (phase) => {
+		vi.useFakeTimers();
+		const snapshotDir = join(tempDir, "snapshots");
+		mkdirSync(snapshotDir);
+		const snapshotPath = join(snapshotDir, "kernel-state.dill");
+		writeFileSync(snapshotPath, "last usable snapshot");
+		vi.spyOn(ReplKernelManager.prototype, "start").mockResolvedValue();
+		vi.spyOn(ReplKernelManager.prototype, "isRunning", "get").mockReturnValue(true);
+		const restored = { restored: ["sentinel"], failed: [], path: snapshotPath };
+		const restore = vi.spyOn(ReplKernelManager.prototype, "restoreState").mockResolvedValue(restored);
+		const execute = vi.spyOn(ReplKernelManager.prototype, "execute").mockResolvedValue(okExecuteResult());
+		if (phase === "restore") restore.mockImplementationOnce(() => new Promise(() => {}));
+		else execute.mockImplementationOnce(() => new Promise(() => {}));
+		const stopped = createDeferred<boolean>();
+		const shutdown = vi
+			.spyOn(ReplKernelManager.prototype, "shutdown")
+			.mockReturnValueOnce(stopped.promise)
+			.mockResolvedValue(true);
+		const onRestore = vi.fn();
+		const provisioner = new IpythonKernelProvisioner(tempDir, { snapshotDir, onRestore });
+		let failure: unknown;
+		const startup = provisioner.ensure().catch((error: unknown) => {
+			failure = error;
+		});
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(shutdown).toHaveBeenCalledWith({ snapshot: false, drainHostRequests: true });
+		expect(failure).toBeUndefined();
+		expect(onRestore).not.toHaveBeenCalled();
+		const phaseSignal = phase === "restore" ? restore.mock.calls[0][0]?.signal : execute.mock.calls[0][1]?.signal;
+		expect(phaseSignal?.aborted).toBe(true);
+		stopped.resolve(true);
+		await startup;
+		expect(String(failure)).toContain("timed out after 30000 ms");
+		expect(readFileSync(snapshotPath, "utf8")).toBe("last usable snapshot");
+		await provisioner.ensure();
+		expect(onRestore).toHaveBeenCalledExactlyOnceWith(restored);
+		expect(execute).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ internal: true }));
+		await provisioner.dispose();
+	});
+
+	it.each([false, true])("uses a routine or diagnostic byte budget (stderr: %s)", async (diagnostic) => {
+		const stdout = "é".repeat(2600);
+		const stderr = diagnostic ? "diagnostic" : "";
+		const execute = vi.fn<KernelClient["execute"]>().mockResolvedValue({
+			stdout,
+			stderr,
+			status: "ok",
+			durationMs: 1,
+			outputComplete: true,
+		});
+		const artifactDir = join(tempDir, "artifacts");
+		const provisioner = { ensure: async () => ({ execute }), artifactDir } as unknown as IpythonKernelProvisioner;
+		const tool = createIpythonToolDefinition(tempDir, { provisioner });
+		const result = await tool.execute("call", { code: "run()" }, undefined, undefined, {} as ExtensionContext);
+		const preview = result.content[0].type === "text" ? result.content[0].text : "";
+		expect(Buffer.byteLength(preview)).toBeLessThanOrEqual(diagnostic ? 8192 : 4096);
+		if (diagnostic) {
+			expect(preview).toBe(`${stdout}\n${stderr}`);
+		} else {
+			const descriptor = result.details.retainedOutput!;
+			expect(descriptor.captureComplete).toBe(true);
+			expect(readFileSync(join(artifactDir, descriptor.artifactId), "utf8")).toBe(stdout);
+			expect(preview).toContain("omitted");
 		}
 	});
 
@@ -356,7 +508,7 @@ describe("IpythonKernelProvisioner", () => {
 		expect(Buffer.byteLength(preview)).toBeLessThanOrEqual(8192);
 		expect(preview).toContain("ValueError: important failure");
 		expect(preview).not.toContain("DECISIVE_MIDDLE");
-		expect(preview).toContain("discarded bytes unavailable");
+		expect(preview).toContain("uncaptured bytes unavailable");
 		expect(Buffer.byteLength(JSON.stringify(result.details))).toBeLessThan(8192);
 		expect(result.details.stdout).toContain("omitted");
 		expect(result.details.error?.ename).toBe("ValueError");

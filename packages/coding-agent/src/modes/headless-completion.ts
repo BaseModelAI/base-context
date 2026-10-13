@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
 import type { AssistantMessage } from "@ponythewhite/base-context-ai";
 import type { AgentSession } from "../core/agent-session.js";
@@ -6,6 +7,7 @@ import {
 	autonomousLimitReason,
 	buildAutonomousGateFailureContinuation,
 } from "../core/autonomous.js";
+import { observeCompletion, withCompletionDeadline } from "../core/completion.js";
 import {
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
 	type CompactionOutcomeMessage,
@@ -79,18 +81,32 @@ function autonomousProgressKey(status: AgentAutonomousStatus): string {
 export interface HeadlessCompletionOptions {
 	/** Include descendant settlement and the parent turns caused by their results. */
 	waitForRlmQuiescence?: boolean;
+	/** End this observation only; owned work continues. */
+	timeoutMs?: number;
+	signal?: AbortSignal;
 }
 
 export async function waitForHeadlessCompletion(
 	session: AgentSession,
 	options: HeadlessCompletionOptions = {},
 ): Promise<AgentAutonomousStatus> {
+	return withCompletionDeadline((signal) => waitForHeadlessCompletionUntilSettled(session, { ...options, signal }), {
+		...options,
+		getBlockers: () => session.getCompletionBlockers(),
+	});
+}
+
+async function waitForHeadlessCompletionUntilSettled(
+	session: AgentSession,
+	options: HeadlessCompletionOptions,
+): Promise<AgentAutonomousStatus> {
 	let lastPromptedProgressKey: string | undefined;
 	let repeatedProgressPrompts = 0;
 	while (true) {
+		options.signal?.throwIfAborted();
 		if (options.waitForRlmQuiescence) {
-			await session.waitForRlmQuiescence(undefined, { waitForOwnedChildDeletion: true });
-		} else await session.waitForHeadlessIdle();
+			await session.waitForRlmQuiescence(undefined, { waitForOwnedChildDeletion: true, signal: options.signal });
+		} else await session.waitForHeadlessIdle(options.signal);
 		const status = session.getAutonomousStatus();
 		if (!shouldContinueAutonomousGates(status) || !status.lastGateFailure) {
 			return status;
@@ -103,22 +119,28 @@ export async function waitForHeadlessCompletion(
 			lastPromptedProgressKey = progressKey;
 		}
 		if (repeatedProgressPrompts > 0) {
-			await new Promise((resolve) => setTimeout(resolve, Math.min(1000, repeatedProgressPrompts * 50)));
+			await delay(Math.min(1000, repeatedProgressPrompts * 50), undefined, { signal: options.signal });
 		}
+		options.signal?.throwIfAborted();
 		session.recordHostAutonomousContinuation();
-		await session.prompt(
-			buildAutonomousGateFailureContinuation(
-				{ ...status.lastGateFailure, attempt: latestAutonomousGateAttempt(status) },
-				status.gates.maxRetries,
+		await observeCompletion(
+			session.prompt(
+				buildAutonomousGateFailureContinuation(
+					{ ...status.lastGateFailure, attempt: latestAutonomousGateAttempt(status) },
+					status.gates.maxRetries,
+				),
+				{
+					streamingBehavior: "followUp",
+					internalPrompt: true,
+					suppressAutonomousContinuation: true,
+				},
 			),
-			{
-				streamingBehavior: "followUp",
-				internalPrompt: true,
-				suppressAutonomousContinuation: true,
-			},
+			options.signal,
 		);
-		await session.waitForIdle();
-		await session.refreshAutonomousGates();
+		options.signal?.throwIfAborted();
+		await observeCompletion(session.waitForIdle(), options.signal);
+		options.signal?.throwIfAborted();
+		await observeCompletion(session.refreshAutonomousGates(), options.signal);
 		const { primary } = selectHeadlessTerminalResult(session.state.messages);
 		if (primary?.role === "assistant") {
 			if (primary.stopReason === "error" || primary.stopReason === "aborted") {

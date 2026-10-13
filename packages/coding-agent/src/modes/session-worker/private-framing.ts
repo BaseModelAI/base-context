@@ -51,7 +51,11 @@ export function encodePrivateFrame<THeader extends object>(
 }
 
 export class PrivateFrameDecoder<THeader extends object> {
-	private buffered: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+	private chunks: Buffer[] = [];
+	private head = 0;
+	private headOffset = 0;
+	private available = 0;
+	private lengths?: { header: number; payload: number };
 
 	constructor(
 		private readonly validateHeader: PrivateFrameHeaderValidator<THeader>,
@@ -59,36 +63,51 @@ export class PrivateFrameDecoder<THeader extends object> {
 	) {}
 
 	get bufferedBytes(): number {
-		return this.buffered.length;
+		return this.available + (this.lengths ? FRAME_PREFIX_BYTES : 0);
+	}
+
+	private readBytes(length: number): Buffer {
+		const result = Buffer.allocUnsafe(length);
+		let written = 0;
+		while (written < length) {
+			const chunk = this.chunks[this.head]!;
+			const count = Math.min(length - written, chunk.length - this.headOffset);
+			chunk.copy(result, written, this.headOffset, this.headOffset + count);
+			written += count;
+			this.headOffset += count;
+			if (this.headOffset === chunk.length) {
+				this.head++;
+				this.headOffset = 0;
+			}
+		}
+		this.available -= length;
+		return result;
 	}
 
 	push(chunk: Uint8Array): PrivateFrame<THeader>[] {
 		if (chunk.length > 0) {
-			const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-			this.buffered = this.buffered.length === 0 ? buffer : Buffer.concat([this.buffered, buffer]);
+			this.chunks.push(Buffer.from(chunk));
+			this.available += chunk.length;
 		}
 
 		const frames: PrivateFrame<THeader>[] = [];
-		let offset = 0;
-		while (this.buffered.length - offset >= FRAME_PREFIX_BYTES) {
-			const headerLength = this.buffered.readUInt32BE(offset);
-			const payloadLength = this.buffered.readUInt32BE(offset + 4);
-			assertFrameLength("header length", headerLength, this.limits.maxHeaderBytes);
-			assertFrameLength("payload length", payloadLength, this.limits.maxPayloadBytes);
-			if (headerLength === 0) {
-				throw new Error("Private frame header cannot be empty");
+		while (true) {
+			if (!this.lengths) {
+				if (this.available < FRAME_PREFIX_BYTES) break;
+				const prefix = this.readBytes(FRAME_PREFIX_BYTES);
+				const header = prefix.readUInt32BE(0);
+				const payload = prefix.readUInt32BE(4);
+				assertFrameLength("header length", header, this.limits.maxHeaderBytes);
+				assertFrameLength("payload length", payload, this.limits.maxPayloadBytes);
+				if (header === 0) throw new Error("Private frame header cannot be empty");
+				this.lengths = { header, payload };
 			}
+			const { header, payload } = this.lengths;
+			if (this.available < header + payload) break;
 
-			const frameLength = FRAME_PREFIX_BYTES + headerLength + payloadLength;
-			if (this.buffered.length - offset < frameLength) {
-				break;
-			}
-
-			const headerStart = offset + FRAME_PREFIX_BYTES;
-			const payloadStart = headerStart + headerLength;
 			let decoded: unknown;
 			try {
-				decoded = JSON.parse(this.buffered.toString("utf8", headerStart, payloadStart));
+				decoded = JSON.parse(this.readBytes(header).toString("utf8"));
 			} catch (error) {
 				throw new Error(
 					`Invalid private frame header JSON: ${error instanceof Error ? error.message : String(error)}`,
@@ -97,23 +116,19 @@ export class PrivateFrameDecoder<THeader extends object> {
 			if (!isObjectHeader(decoded) || !this.validateHeader(decoded)) {
 				throw new Error("Invalid private frame routing header");
 			}
-
-			frames.push({
-				header: decoded,
-				payload: Buffer.from(this.buffered.subarray(payloadStart, payloadStart + payloadLength)),
-			});
-			offset += frameLength;
+			frames.push({ header: decoded, payload: this.readBytes(payload) });
+			this.lengths = undefined;
 		}
-
-		if (offset > 0) {
-			this.buffered = Buffer.from(this.buffered.subarray(offset));
+		if (this.head > 0) {
+			this.chunks = this.chunks.slice(this.head);
+			this.head = 0;
 		}
 		return frames;
 	}
 
 	finish(): void {
-		if (this.buffered.length !== 0) {
-			throw new Error(`Private frame channel ended with ${this.buffered.length} incomplete bytes`);
+		if (this.bufferedBytes !== 0) {
+			throw new Error(`Private frame channel ended with ${this.bufferedBytes} incomplete bytes`);
 		}
 	}
 }

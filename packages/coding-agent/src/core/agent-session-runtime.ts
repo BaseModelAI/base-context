@@ -375,6 +375,10 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		const sessionManager = await SessionManager.create(parent.sessionManager.getCwd(), options.sessionDir, {
 			parentSession: parentSessionFile,
 			rlmDepth: options.rlmDepth,
+		}).catch(async (error: unknown) => {
+			// A compound creation/cleanup failure still owns its resources.
+			if (!(error instanceof AggregateError)) await options.admission.confirmUnboundCleanup();
+			throw error;
 		});
 		let runtime: AgentSessionRuntime;
 		let factoryStarted = false;
@@ -696,10 +700,12 @@ export async function createAgentSessionRuntime(
 	const { sessionLease, ...runtimeOptions } = options;
 	let lease: SessionLease | undefined;
 	let result: CreateAgentSessionRuntimeResult | undefined;
+	let factoryStarted = false;
 	try {
 		lease =
 			sessionLease ?? acquireSessionLease(runtimeOptions.sessionManager.getSessionFile(), runtimeOptions.agentDir);
 		assertSessionCwdExists(runtimeOptions.sessionManager, runtimeOptions.cwd);
+		factoryStarted = true;
 		result = await createRuntime(runtimeOptions);
 		await result.session.initialize();
 		return new AgentSessionRuntime(
@@ -728,6 +734,8 @@ export async function createAgentSessionRuntime(
 		}
 		try {
 			lease?.release();
+			if (!factoryStarted && errors.length === initialErrorCount)
+				await runtimeOptions.sessionOptions?.rlmChildAdmission?.confirmUnboundCleanup();
 		} catch (cleanupError) {
 			if (!errors.includes(cleanupError)) errors.push(cleanupError);
 		}

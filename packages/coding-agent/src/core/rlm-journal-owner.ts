@@ -64,8 +64,13 @@ export class RlmJournalOwner {
 
 	static async open(options: RlmJournalOwnerOptions): Promise<RlmJournalOwner> {
 		const owner = new RlmJournalOwner(options);
-		await owner.ready;
-		return owner;
+		try {
+			await owner.ready;
+			return owner;
+		} catch (error) {
+			await owner.close().catch(() => undefined);
+			throw error;
+		}
 	}
 
 	private constructor(options: RlmJournalOwnerOptions) {

@@ -1,3 +1,4 @@
+import { CompletionWaitTimeoutError } from "../../core/completion.js";
 import {
 	DaemonCapabilityUnavailableError,
 	type DaemonClientCloseListener,
@@ -159,7 +160,8 @@ export class DaemonRoutedClient implements DaemonTransportClient {
 		options: DaemonClientRequestOptions,
 	): Promise<DaemonResponse> {
 		return this.supervisor.request(command, timeoutMs, options).catch((error: unknown) => {
-			if (error instanceof DaemonCapabilityUnavailableError) throw error;
+			if (error instanceof DaemonCapabilityUnavailableError || error instanceof CompletionWaitTimeoutError)
+				throw error;
 			throw new DaemonControlPlaneTransportError(error instanceof Error ? error : new Error(String(error)));
 		});
 	}

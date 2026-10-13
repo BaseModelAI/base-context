@@ -19,6 +19,7 @@ import linecache
 import os
 import platform
 import signal
+import struct
 import sys
 import tempfile
 import threading
@@ -29,13 +30,19 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .bash import _kill_live_handles
+from .bash import BashHandle, _kill_live_handles
 from .product import assert_product_state_path, product_env
 
 PROTOCOL_VERSION = 4
 
+_STREAM_CHUNK_CHARS = 65_536
+_TEXT_EVENT_CHARS = 1_048_576
+_ENCODED_PAYLOAD_CHARS = 16 * 1024 * 1024
+
 DEFAULT_SNAPSHOT_MAX_BYTES = 256 * 1024 * 1024
 DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES = 16 * 1024 * 1024
+_SNAPSHOT_MAGIC = b"BCREPL\x00\x02"
+_SNAPSHOT_RECORD = struct.Struct(">IQ")
 
 # Names the session bootstrap re-creates on every start; never snapshotted.
 _ALWAYS_SKIP = {"rlm", "mcp", "bash", "asyncio", "In", "Out", "get_ipython", "exit", "quit", "open"}
@@ -66,16 +73,56 @@ _finishing_rid: str | None = None
 _handoff_interrupted = False
 
 
-def _send(event: dict[str, Any]) -> None:
-    """Write one protocol frame; the locked single write keeps frames atomic."""
+def _bounded_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    marker = "\n[... runtime output truncated ...]\n"
+    keep = limit - len(marker)
+    head = (keep + 1) // 2
+    return text[:head] + marker + text[-(keep - head):]
+
+
+def _bound_text_event(event: dict[str, Any]) -> dict[str, Any]:
+    kind = event.get("event")
+    if kind == "result":
+        if len(event["text"]) > _TEXT_EVENT_CHARS:
+            return {**event, "text": _bounded_text(event["text"], _TEXT_EVENT_CHARS), "upstreamTruncated": True}
+    elif kind == "error":
+        fields = {"ename": 1024, "evalue": _TEXT_EVENT_CHARS}
+        bounded = dict(event)
+        for field, limit in fields.items():
+            if len(event[field]) > limit:
+                bounded[field] = _bounded_text(event[field], limit)
+                bounded["upstreamTruncated"] = True
+        trace = "".join(event["traceback"])
+        if len(trace) > _TEXT_EVENT_CHARS:
+            bounded["traceback"] = [_bounded_text(trace, _TEXT_EVENT_CHARS)]
+            bounded["upstreamTruncated"] = True
+        return bounded
+    return event
+
+
+def _write_frame(event: dict[str, Any]) -> None:
     data = (json.dumps(event, separators=(",", ":")) + "\n").encode()
+    view = memoryview(data)
+    try:
+        while view:
+            view = view[os.write(_protocol_fd, view) :]
+    except OSError:
+        pass
+
+
+def _send(event: dict[str, Any]) -> None:
+    """Write one protocol frame; the lock keeps frames atomic."""
+    event = _bound_text_event(event)
     with _write_lock:
-        view = memoryview(data)
-        try:
-            while view:
-                view = view[os.write(_protocol_fd, view) :]
-        except OSError:
-            pass
+        _write_frame(event)
+
+
+def _check_payload(data: dict[str, Any]) -> None:
+    encoded = json.dumps(data, allow_nan=False, separators=(",", ":"))
+    if len(encoded) > _ENCODED_PAYLOAD_CHARS:
+        raise ValueError(f"payload exceeds {_ENCODED_PAYLOAD_CHARS} encoded JSON characters")
 
 
 def emit(data: dict[str, Any]) -> None:
@@ -85,12 +132,7 @@ def emit(data: dict[str, Any]) -> None:
     """
     if not isinstance(data, dict) or not data or not all(isinstance(k, str) for k in data):
         raise TypeError("emit() requires a non-empty dict keyed by MIME type strings")
-    # Strict-dumps validation: default allow_nan=True would let NaN/Infinity
-    # serialize as non-JSON text and tear the host's protocol framing (a
-    # non-serializable value already raises in _send before any bytes are
-    # written, so NaN is the only corruption vector). Payloads are small, so
-    # the throwaway serialization here is cheap; _send re-serializes.
-    json.dumps(data, allow_nan=False)
+    _check_payload(data)
     _send({"event": "display", "id": _current_cell.get(), "data": data})
 
 
@@ -105,6 +147,7 @@ async def host_request(data: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("repl runtime is not serving")
     if _host_closed:
         raise RuntimeError("host connection closed; host_request cannot be answered")
+    _check_payload(data)
     rid = uuid.uuid4().hex
     future: asyncio.Future[dict[str, Any]] = _loop.create_future()
     _pending_host[rid] = future
@@ -274,7 +317,10 @@ class _TaggedWriter(io.TextIOBase):
         if not isinstance(text, str):
             raise TypeError(f"write() argument must be str, not {type(text).__name__}")
         if text:
-            _send({"event": self._stream, "id": _current_cell.get(), "text": text})
+            cell_id = _current_cell.get()
+            with _write_lock:
+                for offset in range(0, len(text), _STREAM_CHUNK_CHARS):
+                    _write_frame({"event": self._stream, "id": cell_id, "text": text[offset:offset + _STREAM_CHUNK_CHARS]})
         return len(text)
 
     def flush(self) -> None:
@@ -624,40 +670,9 @@ def _snapshot_state(
         return {"error": f"dill unavailable: {err}"}
     dill.settings["recurse"] = True
 
-    payload: dict[str, bytes] = {}
+    saved: list[str] = []
     skipped: list[dict[str, str]] = []
     oversized: list[str] = []
-    total = 0
-    missing = object()
-    for name in list(ns.keys()):
-        if name.startswith("_") or name in _ALWAYS_SKIP:
-            continue
-        value = ns.get(name, missing)
-        if value is missing:
-            # A background thread deleted the name after the key listing.
-            skipped.append({"name": name, "reason": "deleted during snapshot"})
-            continue
-        remaining = max_bytes - total
-        limit = max_variable_bytes if prune_oversized else min(max_variable_bytes, remaining)
-        buffer = io.BytesIO()
-        try:
-            dill.dump(value, _CappedWriter(buffer, limit))
-            blob = buffer.getvalue()
-        except _SnapshotSizeLimitExceeded:
-            if not prune_oversized and remaining < max_variable_bytes:
-                skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
-            else:
-                skipped.append({"name": name, "reason": "exceeds per-variable snapshot size cap"})
-                oversized.append(name)
-            continue
-        except Exception as err:  # noqa: BLE001 - one unpicklable name must not abort the snapshot
-            skipped.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
-            continue
-        if total + len(blob) > max_bytes:
-            skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
-            continue
-        payload[name] = blob
-        total += len(blob)
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     temps: list[str] = []
@@ -692,40 +707,45 @@ def _snapshot_state(
         try:
             fh, tmp = stage_temp(path, "wb")
             with fh:
-                def dump_to_temp(candidate: dict[str, bytes]) -> int | None:
-                    writer = _CappedWriter(fh, max_bytes)
+                if max_bytes < len(_SNAPSHOT_MAGIC):
+                    return {"error": "write failed: snapshot exceeds aggregate snapshot size cap"}
+                writer = _CappedWriter(fh, max_bytes)
+                writer.write(_SNAPSHOT_MAGIC)
+                missing = object()
+                for name in list(ns.keys()):
+                    if name.startswith("_") or name in _ALWAYS_SKIP:
+                        continue
+                    value = ns.get(name, missing)
+                    if value is missing:
+                        skipped.append({"name": name, "reason": "deleted during snapshot"})
+                        continue
+                    encoded_name = name.encode("utf-8")
+                    overhead = _SNAPSHOT_RECORD.size + len(encoded_name)
+                    remaining = max(0, max_bytes - writer.written - overhead)
+                    limit = max_variable_bytes if prune_oversized else min(max_variable_bytes, remaining)
+                    buffer = io.BytesIO()
                     try:
-                        dill.dump(candidate, writer)
+                        dill.dump(value, _CappedWriter(buffer, limit))
+                        blob = buffer.getvalue()
                     except _SnapshotSizeLimitExceeded:
-                        return None
-                    return writer.written
-
-                def redump_to_temp(candidate: dict[str, bytes]) -> int | None:
-                    fh.seek(0)
-                    fh.truncate()
-                    return dump_to_temp(candidate)
-
-                bytes_written = dump_to_temp(payload)
-                if bytes_written is None:
-                    # Prefix pickle size is monotonic because each prefix only adds a string key and bytes value.
-                    items = list(payload.items())
-                    if redump_to_temp({}) is None:
-                        return {"error": "write failed: snapshot exceeds aggregate snapshot size cap"}
-                    low, high = 0, len(items) - 1
-                    while low < high:
-                        mid = (low + high + 1) // 2
-                        if redump_to_temp(dict(items[:mid])) is None:
-                            high = mid - 1
+                        if not prune_oversized and remaining < max_variable_bytes:
+                            skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
                         else:
-                            low = mid
-                    for name, _ in items[low:]:
+                            skipped.append({"name": name, "reason": "exceeds per-variable snapshot size cap"})
+                            oversized.append(name)
+                        continue
+                    except Exception as err:
+                        skipped.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
+                        continue
+                    if overhead + len(blob) > max_bytes - writer.written:
                         skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
-                    payload = dict(items[:low])
-                    # The search's last attempt may have overflowed the temp; rewrite the chosen prefix.
-                    bytes_written = redump_to_temp(payload)
-                    if bytes_written is None:
-                        return {"error": "write failed: snapshot exceeds aggregate snapshot size cap"}
-            saved = sorted(payload.keys())
+                        continue
+                    writer.write(_SNAPSHOT_RECORD.pack(len(encoded_name), len(blob)))
+                    writer.write(encoded_name)
+                    writer.write(blob)
+                    saved.append(name)
+                bytes_written = writer.written
+            saved.sort()
             pruned = sorted(name for name in oversized if name in ns) if prune_oversized else []
             manifest = {
                 "version": 1,
@@ -782,6 +802,148 @@ def _snapshot_state(
     return result
 
 
+def _guarded_snapshot_load(stream: Any, dill: Any) -> Any:
+    class SnapshotUnpickler(dill.Unpickler):
+        def find_class(self, module: str, name: str) -> Any:
+            resolved = super().find_class(module, name)
+            if resolved is BashHandle:
+                raise dill.UnpicklingError("BashHandle owns process resources and cannot be restored")
+            if name != "_create_filehandle" or not module.startswith("dill."):
+                return resolved
+
+            def create_filehandle(filename: Any, *args: Any, **kwargs: Any) -> Any:
+                if isinstance(filename, int):
+                    raise dill.UnpicklingError("raw file descriptors cannot be restored")
+                return resolved(filename, *args, **kwargs)
+
+            return create_filehandle
+
+    return SnapshotUnpickler(stream).load()
+
+
+def _snapshot_records(stream: Any, dill: Any):
+    if stream.read(len(_SNAPSHOT_MAGIC)) != _SNAPSHOT_MAGIC:
+        stream.seek(0)
+        payload = _guarded_snapshot_load(stream, dill)
+        if not isinstance(payload, dict):
+            raise ValueError("corrupt snapshot: not a dict")
+        yield from payload.items()
+        return
+    size = os.fstat(stream.fileno()).st_size
+    while header := stream.read(_SNAPSHOT_RECORD.size):
+        if len(header) != _SNAPSHOT_RECORD.size:
+            raise ValueError("corrupt snapshot: incomplete record header")
+        name_size, blob_size = _SNAPSHOT_RECORD.unpack(header)
+        if name_size + blob_size > size - stream.tell():
+            raise ValueError("corrupt snapshot: incomplete record")
+        name = stream.read(name_size).decode("utf-8")
+        yield name, stream.read(blob_size)
+
+
+def _revive_with_live_globals(staged: dict[str, Any], ns: dict[str, Any]) -> dict[str, Any]:
+    memo: dict[int, Any] = {}
+    backfill: dict[str, Any] = {}
+
+    def revive(value: Any) -> Any:
+        identity = id(value)
+        if identity in memo:
+            return memo[identity]
+        if isinstance(value, types.FunctionType) and value.__module__ == "__main__":
+            cells = tuple(memo.setdefault(id(cell), types.CellType()) for cell in value.__closure__) if value.__closure__ else None
+            function = types.FunctionType(value.__code__, ns, value.__name__, None, cells)
+            memo[identity] = function
+            function.__module__ = value.__module__
+            function.__qualname__ = value.__qualname__
+            function.__doc__ = value.__doc__
+            function.__defaults__ = revive(value.__defaults__)
+            function.__kwdefaults__ = revive(value.__kwdefaults__)
+            function.__annotations__ = revive(value.__annotations__)
+            function.__dict__.update(revive(value.__dict__))
+            if hasattr(value, "__type_params__"):
+                function.__type_params__ = value.__type_params__
+            for original, cell in zip(value.__closure__ or (), cells or ()):
+                try:
+                    content = original.cell_contents
+                except ValueError:
+                    continue
+                cell.cell_contents = revive(content)
+            for name, item in list(value.__globals__.items()):
+                if (
+                    name.startswith("__") or name in _ALWAYS_SKIP or name in _RESTORE_SKIP
+                    or name in ns or name in staged or name in backfill
+                ):
+                    continue
+                backfill[name] = item
+                backfill[name] = revive(item)
+            return function
+        if isinstance(value, dict):
+            memo[identity] = value
+            items = [(revive(key), revive(item)) for key, item in list(value.items())]
+            value.clear()
+            value.update(items)
+        elif isinstance(value, list):
+            memo[identity] = value
+            value[:] = [revive(item) for item in value]
+        elif type(value) is tuple:
+            items = tuple(revive(item) for item in value)
+            if identity in memo:
+                return memo[identity]
+            value = items
+        elif isinstance(value, set):
+            memo[identity] = value
+            items = [revive(item) for item in value]
+            value.clear()
+            value.update(items)
+        elif type(value) is frozenset:
+            items = [revive(item) for item in value]
+            if identity in memo:
+                return memo[identity]
+            value = frozenset(items)
+        elif isinstance(value, types.MethodType):
+            function, owner = revive(value.__func__), revive(value.__self__)
+            if identity in memo:
+                return memo[identity]
+            value = types.MethodType(function, owner)
+        elif isinstance(value, (staticmethod, classmethod)):
+            function = revive(value.__func__)
+            if identity in memo:
+                return memo[identity]
+            value = type(value)(function)
+        elif isinstance(value, property):
+            getter, setter, deleter = revive(value.fget), revive(value.fset), revive(value.fdel)
+            if identity in memo:
+                return memo[identity]
+            value = property(getter, setter, deleter, value.__doc__)
+        elif isinstance(value, type) and value.__module__ == "__main__":
+            memo[identity] = value
+            for base in value.__bases__:
+                revive(base)
+            for name, item in list(vars(value).items()):
+                if name not in {"__dict__", "__weakref__"}:
+                    replacement = revive(item)
+                    if replacement is not item:
+                        setattr(value, name, replacement)
+        elif type(value).__module__ == "__main__":
+            memo[identity] = value
+            revive(type(value))
+            if hasattr(value, "__dict__"):
+                revive(vars(value))
+            for owner in type(value).__mro__:
+                for descriptor in vars(owner).values():
+                    if isinstance(descriptor, types.MemberDescriptorType):
+                        try:
+                            item = descriptor.__get__(value, type(value))
+                        except AttributeError:
+                            continue  # An unset slot has no value to revive.
+                        descriptor.__set__(value, revive(item))
+        memo[identity] = value
+        return value
+
+    for name, value in list(staged.items()):
+        staged[name] = revive(value)
+    return backfill
+
+
 def _restore_state(
     ns: dict[str, Any], path: str, committed: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:
@@ -791,27 +953,26 @@ def _restore_state(
         import dill
     except Exception as err:  # noqa: BLE001
         return {"error": f"dill unavailable: {err}"}
-    try:
-        with open(path, "rb") as fh:
-            payload = dill.load(fh)
-    except Exception as err:  # noqa: BLE001 - a corrupt snapshot yields an empty restore
-        return {"error": f"load failed: {_safe_str(err)}"}
-    if not isinstance(payload, dict):
-        return {"error": "corrupt snapshot: not a dict"}
-
     staged: dict[str, Any] = {}
     failed: list[dict[str, str]] = []
-    for name, blob in payload.items():
-        if name in _RESTORE_SKIP:
-            continue
-        try:
-            staged[name] = dill.loads(blob)
-        except Exception as err:  # noqa: BLE001 - revive every other name regardless
-            failed.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
+    try:
+        with open(path, "rb") as fh:
+            for name, blob in _snapshot_records(fh, dill):
+                if name in _RESTORE_SKIP or name in _ALWAYS_SKIP:
+                    continue
+                try:
+                    staged[name] = _guarded_snapshot_load(io.BytesIO(blob), dill)
+                except Exception as err:
+                    failed.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
+        backfill = _revive_with_live_globals(staged, ns)
+    except Exception as err:
+        return {"error": f"load failed: {_safe_str(err)}"}
     result = {"restored": sorted(staged), "failed": failed}
     # Park SIGINT across the whole apply so it is all-or-nothing; the parked interrupt is consumed by the commit (as in snapshot).
     previous = signal.signal(signal.SIGINT, lambda signum, frame: None)
     try:
+        for name, value in backfill.items():
+            ns.setdefault(name, value)
         for name, value in staged.items():
             ns[name] = value
         # Publish while still parked: a later KeyboardInterrupt into this task finds the committed result (see _handle_state).

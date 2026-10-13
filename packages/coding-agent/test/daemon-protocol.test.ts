@@ -90,9 +90,9 @@ describe("daemon protocol helpers", () => {
 
 	it("advertises optional agent results without raising startup requirements", () => {
 		expect(DAEMON_PROTOCOL_VERSION).toBe(13);
-		expect(DAEMON_SCHEMA_REVISION).toBe(51);
+		expect(DAEMON_SCHEMA_REVISION).toBe(52);
 		expect(DAEMON_SCHEMA_ID).toBe(
-			`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-rpc-family-completion`,
+			`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-completion-status-interest`,
 		);
 		const command: DaemonCommand = {
 			type: "send_result",

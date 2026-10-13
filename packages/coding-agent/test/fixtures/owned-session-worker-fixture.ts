@@ -1,4 +1,6 @@
-import { existsSync, writeFileSync } from "node:fs";
+import childProcess from "node:child_process";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import {
 	closeOwnedSessionWorkerOwnerWatch,
 	installOwnedSessionWorkerOwnerWatch,
@@ -66,6 +68,9 @@ if (process.env.BASE_CONTEXT_INTERNAL_OWNED_WORKER === "1") {
 		};
 		attachJsonlLineReader(process.stdin, (line) => {
 			const command = JSON.parse(line) as { id?: string; type: string; marker?: string };
+			if (process.env.BASE_CONTEXT_TEST_CLOSED_RPC_INPUT === "1" && pidPath) {
+				appendFileSync(`${pidPath}.received`, `${command.type}\n`);
+			}
 			if (process.env.BASE_CONTEXT_TEST_EXIT_ZERO_ON_COMMAND === command.type) {
 				process.exit(0);
 			}
@@ -119,6 +124,32 @@ if (process.env.BASE_CONTEXT_INTERNAL_OWNED_WORKER === "1") {
 } else {
 	if (pidPath) {
 		writeFileSync(`${pidPath}.frontend`, `${process.pid}\n`);
+	}
+	if (process.env.BASE_CONTEXT_TEST_CLOSED_RPC_INPUT === "1" || process.env.BASE_CONTEXT_TEST_CHILD_ERROR === "1") {
+		const spawn = childProcess.spawn;
+		let first = true;
+		childProcess.spawn = ((...launch: Parameters<typeof spawn>) => {
+			const child = spawn(...launch);
+			if (first && child.stdin) {
+				first = false;
+				const input = child.stdin;
+				const write = input.write.bind(input);
+				input.write = ((...writeArgs: Parameters<typeof input.write>) => {
+					const command = JSON.parse(String(writeArgs[0])) as { type: string };
+					if (command.type === "mutation") {
+						if (process.env.BASE_CONTEXT_TEST_CHILD_ERROR === "1") {
+							process.nextTick(() => child.emit("error", new Error("fixture child process error")));
+						} else {
+							input.destroy(Object.assign(new Error("fixture stdin failure"), { code: "EPIPE" }));
+						}
+						return false;
+					}
+					return write(...writeArgs);
+				}) as typeof input.write;
+			}
+			return child;
+		}) as typeof spawn;
+		syncBuiltinESMExports();
 	}
 	await maybeRunOwnedSessionWorkerFrontend(args);
 }

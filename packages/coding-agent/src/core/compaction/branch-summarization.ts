@@ -8,12 +8,7 @@
 import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
 import { getCodexContextPolicy, type Model, type Usage } from "@ponythewhite/base-context-ai";
 import { completeInference, InferenceCoordinator } from "../inference-coordinator.js";
-import {
-	convertToLlm,
-	createBranchSummaryMessage,
-	createCompactionSummaryMessage,
-	createCustomMessage,
-} from "../messages.js";
+import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "../messages.js";
 import type { NativeBranchRequestOutputWriter } from "../request-events.js";
 import { MODEL_REQUEST_ID_HEADER } from "../semantic-edges.js";
 import type { SessionEntry } from "../session-manager.js";
@@ -151,8 +146,8 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
  * This ensures we keep the most recent context when the branch is too long.
  *
  * Also collects file operations from:
- * - Tool calls in assistant messages
- * - Existing branch_summary entries' details (for cumulative tracking)
+ * - Selected assistant tool calls and their structured edit results
+ * - Existing native summary details (for cumulative tracking)
  *
  * @param entries - Entries in chronological order
  * @param tokenBudget - Maximum tokens to include (0 = no limit)
@@ -166,7 +161,7 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 	// This ensures we capture cumulative file tracking from nested branch summaries
 	// Only extract from pi-generated summaries (fromHook !== true), not extension-generated ones
 	for (const entry of entries) {
-		if (entry.type === "branch_summary" && !entry.fromHook && entry.details) {
+		if ((entry.type === "branch_summary" || entry.type === "compaction") && !entry.fromHook && entry.details) {
 			const details = entry.details as BranchSummaryDetails;
 			if (Array.isArray(details.readFiles)) {
 				for (const f of details.readFiles) fileOps.read.add(f);
@@ -182,7 +177,6 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 		const entry = entries[i];
 		const message = getMessageFromEntry(entry);
 		if (!message) continue;
-		extractFileOpsFromMessage(message, fileOps);
 
 		const tokens = estimateTokens(message);
 		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
@@ -199,6 +193,24 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 		totalTokens += tokens;
 	}
 
+	const selectedToolCalls = new Set<string>();
+	for (const message of messages) {
+		extractFileOpsFromMessage(message, fileOps);
+		if (message.role === "assistant") {
+			for (const block of message.content) {
+				if (block.type === "toolCall") selectedToolCalls.add(block.id);
+			}
+		}
+	}
+	for (const entry of entries) {
+		if (
+			entry.type === "message" &&
+			entry.message.role === "toolResult" &&
+			selectedToolCalls.has(entry.message.toolCallId)
+		) {
+			extractFileOpsFromMessage(entry.message, fileOps);
+		}
+	}
 	return { messages, fileOps, totalTokens };
 }
 const BRANCH_SUMMARY_PREAMBLE = `The user explored a different conversation branch before returning here.
@@ -262,14 +274,15 @@ export async function generateBranchSummary(
 		reserveTokens === undefined && policy ? policy.usableContextWindow : contextWindow - (reserveTokens ?? 16384);
 
 	const { messages, fileOps } = prepareBranchEntries(entries, tokenBudget);
+	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+	const fileSummary = formatFileOperations(readFiles, modifiedFiles);
 
-	// Nothing model-visible remains after filtering.
+	// The input cutoff does not erase metadata inherited from native summaries.
 	if (messages.length === 0) {
-		return { summary: "No content to summarize" };
+		return { summary: `No content to summarize${fileSummary}`, readFiles, modifiedFiles };
 	}
 	// Serialize before the LLM call so it summarizes rather than continues this branch.
-	const llmMessages = convertToLlm(messages);
-	const conversationText = serializeConversation(llmMessages);
+	const conversationText = serializeConversation(messages);
 	let instructions: string;
 	if (replaceInstructions && customInstructions) {
 		instructions = customInstructions;
@@ -321,8 +334,7 @@ export async function generateBranchSummary(
 		.map((c) => c.text)
 		.join("\n");
 	summary = BRANCH_SUMMARY_PREAMBLE + summary;
-	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary += formatFileOperations(readFiles, modifiedFiles);
+	summary += fileSummary;
 
 	const result = {
 		summary: summary || "No summary generated",

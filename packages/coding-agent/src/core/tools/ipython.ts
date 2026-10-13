@@ -8,6 +8,7 @@ import { PRODUCT } from "../../product-identity.js";
 import { IMAGE_MIME_TYPES } from "../../utils/mime.js";
 import { resolveKernelBashShell } from "../../utils/shell.js";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.js";
+import { resolveForegroundWaitMs } from "../ipython-settings.js";
 import { withKernelBootPermit } from "../kernel/boot-gate.js";
 import type { KernelBootstrapProgressHandler } from "../kernel/bootstrap.js";
 import {
@@ -27,6 +28,7 @@ import {
 } from "../kernel/index.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
 import {
+	getToolOutputPreviewBytes,
 	outputExcerpt,
 	type RetainedToolOutput,
 	retainToolOutput,
@@ -263,6 +265,25 @@ function createLinkedAbortSignal(sources: readonly (AbortSignal | undefined)[]):
 	};
 }
 
+async function runStartupPhase<T>(
+	phase: string,
+	signal: AbortSignal,
+	run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+	const deadline = new AbortController();
+	const linked = createLinkedAbortSignal([signal, deadline.signal]);
+	const timer = setTimeout(() => deadline.abort(), 30_000);
+	try {
+		return await raceWithAbort(run(linked.signal), linked.signal);
+	} catch (error) {
+		if (deadline.signal.aborted) throw new Error(`Python kernel ${phase} timed out after 30000 ms`, { cause: error });
+		throw error;
+	} finally {
+		clearTimeout(timer);
+		linked.cleanup();
+	}
+}
+
 function setWorkingMessage(ctx: ExtensionContext | undefined, message?: string): void {
 	try {
 		ctx?.ui.setWorkingMessage(message);
@@ -322,6 +343,8 @@ interface OwnedIpythonExecution extends IpythonPendingExecution {
 export interface IpythonToolOptions {
 	/** @internal Captured inside an actual owned tool invocation, not inferred from cell output. */
 	captureNativeRecoveryScope?: () => ExecuteOptions["runNativeRecovery"];
+	/** Foreground wait after admission, in milliseconds; does not cancel execution. Default: 1000. */
+	foregroundWaitMs?: number;
 	/** Python override. Must have base-context-runtime installed. */
 	python?: string;
 	env?: Record<string, string>;
@@ -348,7 +371,7 @@ export interface IpythonToolOptions {
 	onExecutionPending?: (execution: IpythonPendingExecution) => void;
 	/** Capture the genuine producer so later collection can transfer its actual read qualification. */
 	captureNativeRecoveryDelivery?: () => () => void;
-	/** Shared provisioner owning the kernel lifecycle. When provided, the remaining options are ignored. */
+	/** Shared kernel lifecycle; per-tool wait and execution callbacks still apply. */
 	provisioner?: IpythonKernelProvisioner;
 }
 
@@ -363,12 +386,12 @@ export class IpythonKernelProvisioner {
 	private readonly lifecycleOwner = uuid();
 	private managerPromise?: Promise<KernelClient>;
 	private startedManager?: KernelClient;
+	private teardownPromise?: Promise<void>;
+	private startupCleanupError?: Error;
 	private readonly startupListeners = new Set<KernelBootstrapProgressHandler>();
 	private lastStartupMessage?: string;
 	private _lastRestore?: RestoreResult;
 	private readonly disposeController = new AbortController();
-	/** Snapshot policy of the dispose that aborted a startup, honored by startKernel's failure teardown. */
-	private disposeSnapshot = true;
 
 	constructor(
 		private readonly cwd: string,
@@ -447,40 +470,47 @@ export class IpythonKernelProvisioner {
 	}
 
 	/** Dispose the kernel owned by this provisioner, including one still starting up. */
-	async dispose(options?: { snapshot?: boolean }): Promise<void> {
-		this.disposeSnapshot = options?.snapshot ?? true;
-		// Drops a still-queued boot out of the semaphore and short-circuits an
-		// in-flight startKernel before it spawns, so a disposed session's boot
-		// doesn't waste a slot during a fan-out.
+	dispose(options?: { snapshot?: boolean }): Promise<void> {
 		this.disposeController.abort();
-		const pending = this.managerPromise;
-		this.managerPromise = undefined;
-		this.startedManager = undefined;
-		if (!pending) return;
-		try {
-			const m = await pending;
-			await m.shutdown({ snapshot: this.disposeSnapshot, drainHostRequests: true });
-		} catch {
-			// a failed startup already cleaned up after itself
-		}
+		return this.teardown("dispose", options?.snapshot ?? true);
 	}
 
-	async kill(): Promise<void> {
+	kill(): Promise<void> {
+		return this.teardown("kill", false);
+	}
+
+	private teardown(action: "dispose" | "kill", snapshot: boolean): Promise<void> {
+		if (this.teardownPromise) return this.teardownPromise;
 		const pending = this.managerPromise;
 		this.managerPromise = undefined;
 		this.startedManager = undefined;
-		if (!pending) return;
-		try {
-			const m = await pending;
-			await m.kill();
-		} catch {
-			// a failed startup already cleaned up after itself
-		}
+		if (!pending) return this.startupCleanupError ? Promise.reject(this.startupCleanupError) : Promise.resolve();
+		const teardown = pending.then(
+			async (m) => {
+				if (action === "kill") await m.kill();
+				else await m.shutdown({ snapshot, drainHostRequests: true });
+			},
+			() => {
+				if (this.startupCleanupError) throw this.startupCleanupError;
+			},
+		);
+		this.teardownPromise = teardown;
+		void teardown.then(
+			() => {
+				if (this.teardownPromise === teardown) this.teardownPromise = undefined;
+			},
+			() => {}, // A failed teardown must not admit a replacement.
+		);
+		return teardown;
 	}
 
 	ensure(onProgress?: KernelBootstrapProgressHandler, signal?: AbortSignal): Promise<KernelClient> {
-		if (signal?.aborted) {
+		if (signal?.aborted || this.disposeController.signal.aborted) {
 			return Promise.reject(createAbortError());
+		}
+		if (this.startupCleanupError) return Promise.reject(this.startupCleanupError);
+		if (this.teardownPromise) {
+			return raceWithAbort(this.teardownPromise, signal).then(() => this.ensure(onProgress, signal));
 		}
 		let cleanupProgressListener: (() => void) | undefined;
 		if (onProgress && !this.startedManager) {
@@ -541,10 +571,7 @@ export class IpythonKernelProvisioner {
 		// no-gate path stays synchronous (callers rely on prompt startup progress).
 		try {
 			if (this.options?.readyGate) {
-				await raceWithAbort(
-					this.options.readyGate.catch(() => {}),
-					startupSignal,
-				);
+				await raceWithAbort(this.options.readyGate, startupSignal);
 			}
 			const snapshotDir = this.options?.snapshotDir;
 			// Always inject an absolute trusted shell (undefined only on win32
@@ -570,6 +597,7 @@ export class IpythonKernelProvisioner {
 					: undefined,
 				stderrLogPath: snapshotDir ? join(snapshotDir, "kernel-stderr.log") : undefined,
 				bootstrapCode,
+				deferInitialSnapshot: true,
 			});
 			let pendingRestore: RestoreResult | undefined;
 			try {
@@ -578,9 +606,8 @@ export class IpythonKernelProvisioner {
 				this.emitStartupProgress("Starting Python kernel...");
 				// Only the process spawn + port resolve contends for OS resources under a
 				// fan-out, and it is bounded by start()'s own timeouts — so the permit
-				// covers only start(). Restore/bootstrap run per-kernel afterwards and are
-				// unbounded execute()s; holding the global permit across them could pin it
-				// forever on a wedged bootstrap and starve every other session's boot.
+				// covers only start(). Restore/bootstrap have per-kernel deadlines and
+				// must not hold the global spawn permit while preparing state.
 				await withKernelBootPermit(() => {
 					// Disposed while queued for the permit — don't spawn a kernel nobody wants.
 					if (startupSignal.aborted) throw new Error("Kernel provisioner disposed before start");
@@ -594,34 +621,40 @@ export class IpythonKernelProvisioner {
 				if (snapshotDir) {
 					const snapshotExisted = existsSync(snapshotPathIn(snapshotDir));
 					this.emitStartupProgress("Restoring Python state...");
-					const restore = await raceWithAbort(m.restoreState(), startupSignal);
+					const restore = await runStartupPhase("state restore", startupSignal, (signal) =>
+						m.restoreState({ signal }),
+					);
 					if (snapshotExisted) {
-						pendingRestore = restore ?? { restored: [], failed: [], path: snapshotPathIn(snapshotDir) };
+						if (!restore) throw new Error("Failed to restore the Python kernel snapshot; snapshot preserved");
+						pendingRestore = restore;
 					}
 				}
 				this.emitStartupProgress("Preparing Python runtime...");
-				const bootstrap = await m.execute(bootstrapCode, {
-					signal: startupSignal,
-				});
+				const bootstrap = await runStartupPhase("runtime bootstrap", startupSignal, (signal) =>
+					m.execute(bootstrapCode, { signal, internal: true }),
+				);
 				if (bootstrap.status !== "ok") {
 					const details = [bootstrap.stderr, bootstrap.error?.traceback.join("\n")].filter(Boolean).join("\n");
 					throw new Error(`Failed to initialize rlm runtime in the Python kernel:\n${details}`);
 				}
+				if (startupSignal.aborted) throw createAbortError();
+				if (pendingRestore) this.options?.onRestore?.(pendingRestore);
+				if (startupSignal.aborted) throw createAbortError();
+				m.markSnapshotReady();
+				this._lastRestore = pendingRestore;
+				return m;
 			} catch (error) {
-				// Never leak the kernel process if startup fails after spawn — and never
-				// surface the failure before the teardown (final snapshot flush included)
-				// finished, or a replacement provisioner gated on this dispose could
-				// race the still-flushing kernel over the same snapshot files.
-				await m.shutdown({ snapshot: this.disposeSnapshot, drainHostRequests: true }).catch(() => undefined);
+				try {
+					await m.shutdown({ snapshot: false, drainHostRequests: true });
+				} catch (cleanupError) {
+					this.startupCleanupError = new AggregateError(
+						[error, cleanupError],
+						"Python kernel startup and cleanup failed; replacement startup blocked",
+					);
+					throw this.startupCleanupError;
+				}
 				throw error;
 			}
-			// Only tell the model what was revived once the kernel is actually usable —
-			// a notice claiming restored state must never outlive a failed bootstrap.
-			if (pendingRestore) {
-				this._lastRestore = pendingRestore;
-				this.options?.onRestore?.(pendingRestore);
-			}
-			return m;
 		} finally {
 			startupAbort.cleanup();
 		}
@@ -712,6 +745,7 @@ export function createIpythonToolDefinition(
 	options?: IpythonToolOptions,
 ): ToolDefinition<typeof ipythonSchema, IpythonToolDetails> {
 	const provisioner = options?.provisioner ?? new IpythonKernelProvisioner(cwd, options);
+	const foregroundWaitMs = resolveForegroundWaitMs(options?.foregroundWaitMs);
 	let pendingExecution: OwnedIpythonExecution | undefined;
 	let admittingExecution = false;
 	const pendingResult = (execution: OwnedIpythonExecution, notice?: string, rejected = false) => {
@@ -849,15 +883,27 @@ export function createIpythonToolDefinition(
 						});
 						options?.onExecutionPending?.(owned);
 						let timer: ReturnType<typeof setTimeout> | undefined;
+						const aborted = createDeferred<void>();
+						const onAbort = () => aborted.resolve();
+						signal?.addEventListener("abort", onAbort, { once: true });
+						if (signal?.aborted) onAbort();
 						try {
 							await Promise.race([
 								completion.promise,
+								aborted.promise,
 								new Promise<void>((resolve) => {
-									timer = setTimeout(resolve, 1000);
+									let remaining = foregroundWaitMs;
+									const schedule = () => {
+										const delay = Math.min(remaining, 2_147_483_647);
+										remaining -= delay;
+										timer = setTimeout(() => (remaining > 0 ? schedule() : resolve()), delay);
+									};
+									schedule();
 								}),
 							]);
 						} finally {
 							if (timer) clearTimeout(timer);
+							signal?.removeEventListener("abort", onAbort);
 						}
 						if (owned.status === "pending") {
 							yielded = true;
@@ -894,26 +940,27 @@ export function createIpythonToolDefinition(
 					add("[background output (unattributed)]");
 					add(r.backgroundOutput);
 				}
+				const previewBytes = getToolOutputPreviewBytes(r);
 				const byteLength = parts.reduce((size, part) => size + Buffer.byteLength(part), 0);
 				let retainedOutput = r.retainedOutput;
-				if (!retainedOutput && provisioner.artifactDir && byteLength > TOOL_OUTPUT_PREVIEW_BYTES - 2048) {
+				if (!retainedOutput && provisioner.artifactDir && byteLength > previewBytes - 2048) {
 					retainedOutput = await retainToolOutput(provisioner.artifactDir, parts, r.outputComplete === true);
 				}
 				let text: string;
 				if (retainedOutput) {
-					const wrapper = `ipython ${r.status}; retained output ${retainedOutput.artifactId} (${retainedOutput.byteLength} UTF-8 bytes; ${retainedOutput.captureComplete ? "capture complete" : "partial/unknown capture; uncaptured bytes unavailable"}${retainedOutput.captureError ? `; ${retainedOutput.captureError}` : ""}).\n[Output omitted; retained field ${retainedOutput.field}.]\n`;
-					let excerptBytes = 1024;
-					do {
-						const priority = errorText || r.stderr;
-						text =
-							wrapper +
-							(priority ? `Error/stderr:\n${outputExcerpt(priority, excerptBytes)}\n` : "") +
-							`Captured channel excerpts:\n${outputExcerpt(parts[0], excerptBytes)}\n${parts.length > 1 ? outputExcerpt(parts[parts.length - 1], excerptBytes) : ""}`;
-						excerptBytes = Math.floor(excerptBytes / 2);
-					} while (
-						Buffer.byteLength(JSON.stringify(text)) > TOOL_OUTPUT_PREVIEW_BYTES - 4096 &&
-						excerptBytes >= 64
+					const wrapper = `ipython ${r.status}; retained output ${retainedOutput.artifactId} (${retainedOutput.byteLength} UTF-8 bytes; ${retainedOutput.captureComplete ? "capture complete" : "partial/unknown capture; uncaptured bytes unavailable"}${retainedOutput.captureError ? `; ${outputExcerpt(retainedOutput.captureError, 256)}` : ""}).
+[Output omitted; retained field ${retainedOutput.field}.]
+`;
+					const priority = errorText || r.stderr;
+					const labels = `${priority ? "Error/stderr:\n\n" : ""}Captured channel excerpts:\n\n`;
+					const channelCount = (priority ? 1 : 0) + (parts.length > 1 ? 2 : 1);
+					const excerptBytes = Math.floor(
+						(previewBytes - Buffer.byteLength(wrapper) - Buffer.byteLength(labels)) / channelCount,
 					);
+					text =
+						wrapper +
+						(priority ? `Error/stderr:\n${outputExcerpt(priority, excerptBytes)}\n` : "") +
+						`Captured channel excerpts:\n${outputExcerpt(parts[0], excerptBytes) ?? ""}\n${parts.length > 1 ? outputExcerpt(parts[parts.length - 1], excerptBytes) : ""}`;
 				} else text = parts.join("");
 				const excerpt = (value: string | undefined) => (retainedOutput ? outputExcerpt(value, 512) : value);
 				const error =

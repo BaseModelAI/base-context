@@ -21,7 +21,6 @@ import {
 import {
 	COMPACTION_SUMMARY_PREFIX,
 	COMPACTION_SUMMARY_SUFFIX,
-	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
@@ -84,21 +83,12 @@ export function takeCompactionRequestOutputs(
 	return outputs.length ? outputs : undefined;
 }
 
-/**
- * Extract file operations from messages and previous compaction entries.
- */
-/** Preserve file operations recorded by prior compactions and current tool calls. */
-function extractFileOperations(
-	messages: AgentMessage[],
-	entries: SessionEntry[],
-	prevCompactionIndex: number,
-): FileOperations {
+/** Preserve native summary metadata and edits from exactly the summarized entries. */
+function extractFileOperations(entries: SessionEntry[], previousCompaction?: SessionEntry): FileOperations {
 	const fileOps = createFileOps();
-	if (prevCompactionIndex >= 0) {
-		const prevCompaction = entries[prevCompactionIndex] as CompactionEntry;
-		if (!prevCompaction.fromHook && prevCompaction.details) {
-			// fromHook field kept for session file compatibility
-			const details = prevCompaction.details as CompactionDetails;
+	for (const entry of previousCompaction ? [previousCompaction, ...entries] : entries) {
+		if ((entry.type === "compaction" || entry.type === "branch_summary") && !entry.fromHook && entry.details) {
+			const details = entry.details as CompactionDetails;
 			if (Array.isArray(details.readFiles)) {
 				for (const f of details.readFiles) fileOps.read.add(f);
 			}
@@ -106,11 +96,9 @@ function extractFileOperations(
 				for (const f of details.modifiedFiles) fileOps.edited.add(f);
 			}
 		}
+		const message = getMessageFromEntryForCompaction(entry);
+		if (message) extractFileOpsFromMessage(message, fileOps);
 	}
-	for (const msg of messages) {
-		extractFileOpsFromMessage(msg, fileOps);
-	}
-
 	return fileOps;
 }
 /**
@@ -421,7 +409,20 @@ function findValidCutPoints(entries: SessionEntry[], startIndex: number, endInde
 			cutPoints.push(i);
 		}
 	}
-	return cutPoints;
+	const callStarts = new Map<string, number>();
+	const spans: [number, number][] = [];
+	for (let index = startIndex; index < endIndex; index++) {
+		const message = getMessageFromEntryForCompaction(entries[index]);
+		if (message?.role === "assistant") {
+			for (const block of message.content) {
+				if (block.type === "toolCall") callStarts.set(block.id, index);
+			}
+		} else if (message?.role === "toolResult") {
+			const start = callStarts.get(message.toolCallId);
+			if (start !== undefined) spans.push([start, index]);
+		}
+	}
+	return cutPoints.filter((candidate) => spans.every(([start, end]) => candidate <= start || candidate > end));
 }
 
 /**
@@ -487,9 +488,9 @@ export function findCutPoint(
 	let cutIndex = cutPoints[0]; // Default: keep from first message (not header)
 
 	for (let i = endIndex - 1; i >= startIndex; i--) {
-		const entry = entries[i];
-		if (entry.type !== "message") continue;
-		const messageTokens = estimateTokens(entry.message) * tokenScale;
+		const message = getMessageFromEntryForCompaction(entries[i]);
+		if (!message) continue;
+		const messageTokens = estimateTokens(message) * tokenScale;
 		accumulatedTokens += messageTokens;
 		if (accumulatedTokens >= keepRecentTokens) {
 			cutIndex = cutPoints.filter((candidate) => candidate <= i).at(-1) ?? cutIndex;
@@ -511,7 +512,7 @@ export function findCutPoint(
 		if (prevEntry.type === "compaction") {
 			break;
 		}
-		if (prevEntry.type === "message") {
+		if (getMessageFromEntry(prevEntry)) {
 			break;
 		}
 		cutIndex--;
@@ -638,8 +639,7 @@ export async function generateSummary(
 
 	const basePrompt = buildSummarizationPrompt(customInstructions, previousSummary);
 	// Serialize before the LLM call so it summarizes rather than continues this conversation.
-	const llmMessages = convertToLlm(currentMessages);
-	const conversationText = serializeConversation(llmMessages);
+	const conversationText = serializeConversation(currentMessages);
 	let promptText = `<conversation>\n${conversationText}\n</conversation>`;
 	if (previousSummary) {
 		promptText += `\n\n<previous-summary>\n${previousSummary}\n</previous-summary>`;
@@ -676,6 +676,10 @@ export async function generateSummary(
 	);
 
 	const response = await completion;
+	// Session-owned cancellation is normalized by the caller after all summary work drains.
+	if (response.stopReason === "aborted" && !signal?.aborted) {
+		throw new DOMException(response.errorMessage || "Compaction cancelled", "AbortError");
+	}
 	if (response.stopReason === "error") {
 		throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
 	}
@@ -737,47 +741,42 @@ export function prepareViewCompaction(
 			? [index]
 			: [],
 	);
-	let relaxRetention = false;
-	if (budgetPressure) {
-		// Only caller-confirmed public OVER may relax retention; source/tool groups remain whole.
-		const spans: [number, number][] = [];
-		const sourceStarts = new Map<string, number>();
-		const resultEnds = new Map<string, number>();
-		// Public history renders original roles as custom text; use its captured source anchors.
-		const sourceMessages = new Map(pathEntries.map((entry) => [entry.id, getMessageFromEntry(entry)]));
-		const anchoredMessages = messages.map((message, index) => sourceMessages.get(entryIds[index] ?? "") ?? message);
-		for (const [index, message] of anchoredMessages.entries()) {
-			const entryId = entryIds[index];
-			if (entryId) {
-				const start = sourceStarts.get(entryId);
-				if (start === undefined) sourceStarts.set(entryId, index);
-				else spans.push([start, index]);
-			}
-			if (message.role === "toolResult") resultEnds.set(message.toolCallId, index);
+	// Public history renders original roles as custom text; cuts still follow captured source groups.
+	const spans: [number, number][] = [];
+	const sourceStarts = new Map<string, number>();
+	const resultEnds = new Map<string, number>();
+	const sourceMessages = new Map(pathEntries.map((entry) => [entry.id, getMessageFromEntry(entry)]));
+	const anchoredMessages = messages.map((message, index) => sourceMessages.get(entryIds[index] ?? "") ?? message);
+	for (const [index, message] of anchoredMessages.entries()) {
+		const entryId = entryIds[index];
+		if (entryId) {
+			const start = sourceStarts.get(entryId);
+			if (start === undefined) sourceStarts.set(entryId, index);
+			else spans.push([start, index]);
 		}
-		let latestCompleteExchange = messages.length - 1;
-		const completedAssistants: number[] = [];
-		for (const [index, message] of anchoredMessages.entries()) {
-			if (message.role !== "assistant") continue;
-			const calls = message.content.filter((block) => block.type === "toolCall");
-			const completeExchange = calls.length > 0 && calls.every((call) => (resultEnds.get(call.id) ?? -1) > index);
-			if (completeExchange) latestCompleteExchange = index;
-			if (completeExchange || (!calls.length && message.stopReason === "stop")) completedAssistants.push(index);
-			for (const call of calls) {
-				const end = resultEnds.get(call.id);
-				if (end !== undefined && end > index) spans.push([index, end]);
-			}
-		}
-		// A lone current instruction before its first exchange is not removable history.
-		relaxRetention = completedAssistants.some((index) => index < latestCompleteExchange);
-		if (relaxRetention) {
-			cuts = cuts.filter(
-				(candidate) =>
-					candidate <= latestCompleteExchange &&
-					spans.every(([start, end]) => candidate <= start || candidate > end),
-			);
+		if (message.role === "toolResult") resultEnds.set(message.toolCallId, index);
+	}
+	let latestCompleteExchange = messages.length - 1;
+	const completedAssistants: number[] = [];
+	for (const [index, message] of anchoredMessages.entries()) {
+		if (message.role !== "assistant") continue;
+		const calls = message.content.filter((block) => block.type === "toolCall");
+		const completeExchange = calls.length > 0 && calls.every((call) => (resultEnds.get(call.id) ?? -1) > index);
+		if (completeExchange) latestCompleteExchange = index;
+		if (completeExchange || (!calls.length && message.stopReason === "stop")) completedAssistants.push(index);
+		for (const call of calls) {
+			const end = resultEnds.get(call.id);
+			if (end !== undefined && end > index) spans.push([index, end]);
 		}
 	}
+	cuts = cuts.filter(
+		(candidate) =>
+			anchoredMessages[candidate].role !== "toolResult" &&
+			spans.every(([start, end]) => candidate <= start || candidate > end),
+	);
+	// Only caller-confirmed public OVER may relax retention, and not for a lone current instruction.
+	const relaxRetention = budgetPressure && completedAssistants.some((index) => index < latestCompleteExchange);
+	if (relaxRetention) cuts = cuts.filter((candidate) => candidate <= latestCompleteExchange);
 	if (!cuts.length) return;
 	const tokenScale = compactionTokenScale(messages);
 	let cut = cuts[0];
@@ -831,8 +830,10 @@ export function prepareViewCompaction(
 	const messagesToSummarize = messages.filter(
 		(message, index) => message.role !== "compactionSummary" && (!entryIds[index] || index < historyEnd),
 	);
-	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, previousSummaryIndex);
-	for (const message of turnPrefixMessages) extractFileOpsFromMessage(message, fileOps);
+	// Public views omit structured tool metadata. Use only their captured, summarized source entries.
+	const summarizedEntryIds = new Set(entryIds.slice(0, cut).filter((id) => id !== undefined));
+	const summarizedEntries = pathEntries.filter((entry) => summarizedEntryIds.has(entry.id));
+	const fileOps = extractFileOperations(summarizedEntries, pathEntries[previousSummaryIndex]);
 	return {
 		firstKeptEntryId: entryIds[cut]!,
 		messagesToSummarize: structuredClone(messagesToSummarize),
@@ -907,13 +908,10 @@ export function prepareCompaction(
 	if (messagesToSummarize.length === 0 && turnPrefixMessages.length === 0 && (allowShortSession || !previousSummary)) {
 		return undefined;
 	}
-	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, prevCompactionIndex);
-	// Split turns retain their suffix, but their prefix file operations still belong in the summary.
-	if (cutPoint.isSplitTurn) {
-		for (const msg of turnPrefixMessages) {
-			extractFileOpsFromMessage(msg, fileOps);
-		}
-	}
+	const fileOps = extractFileOperations(
+		pathEntries.slice(boundaryStart, cutPoint.firstKeptEntryIndex),
+		pathEntries[prevCompactionIndex],
+	);
 
 	return {
 		firstKeptEntryId,
@@ -982,14 +980,14 @@ export async function compact(
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	const fileSummary = formatFileOperations(readFiles, modifiedFiles);
 	const split = isSplitTurn && turnPrefixMessages.length > 0;
+	const historyNeeded = !split || messagesToSummarize.length > 0 || !!previousSummary;
 	const splitSeparator = "\n\n---\n\n**Turn Context (split turn):**\n\n";
 	const wrapper =
 		COMPACTION_SUMMARY_PREFIX +
-		(split ? (messagesToSummarize.length ? "" : "No prior history.") + splitSeparator : "") +
+		(split ? (historyNeeded ? "" : "No prior history.") + splitSeparator : "") +
 		fileSummary +
 		COMPACTION_SUMMARY_SUFFIX;
 	const capacity = summaryCapacity?.(wrapper);
-	const historyNeeded = !split || messagesToSummarize.length > 0;
 	const calls = Number(historyNeeded) + Number(split);
 	if (capacity !== undefined && capacity < calls)
 		throw new Error(
@@ -1014,7 +1012,7 @@ export async function compact(
 	if (split) {
 		// Split turns make two wire calls with different bodies; each needs its own identity.
 		const [historyResult, turnPrefixResult] = await Promise.all([
-			messagesToSummarize.length > 0
+			historyNeeded
 				? summaryCall((callHeaders) =>
 						generateSummary(
 							messagesToSummarize,
@@ -1109,8 +1107,7 @@ async function generateTurnPrefixSummary(
 	outputTokenLimit?: number,
 ): Promise<SummarySlice> {
 	const maxTokens = outputTokenLimit ?? (getCodexContextPolicy(model) ? undefined : Math.floor(0.5 * reserveTokens));
-	const llmMessages = convertToLlm(messages);
-	const conversationText = serializeConversation(llmMessages);
+	const conversationText = serializeConversation(messages);
 	const promptText = `${TURN_PREFIX_SUMMARIZATION_PROMPT}\n\n<conversation>\n${conversationText}\n</conversation>`;
 	const summarizationMessages = [
 		{
@@ -1136,6 +1133,10 @@ async function generateTurnPrefixSummary(
 	);
 
 	const response = await completion;
+	// Session-owned cancellation is normalized by the caller after all summary work drains.
+	if (response.stopReason === "aborted" && !signal?.aborted) {
+		throw new DOMException(response.errorMessage || "Compaction cancelled", "AbortError");
+	}
 	if (response.stopReason === "error") {
 		throw new Error(`Turn prefix summarization failed: ${response.errorMessage || "Unknown error"}`);
 	}

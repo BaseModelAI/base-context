@@ -10,6 +10,7 @@ import type { ImageContent, Model } from "@ponythewhite/base-context-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type { CompactionResult } from "../../core/compaction/index.js";
+import type { CompletionWaitDiagnostics } from "../../core/completion.js";
 import type {
 	AgentCronJob,
 	AgentHeartbeatDeliveryMode,
@@ -21,13 +22,20 @@ import type { RefinementResult } from "../../core/refinement/index.js";
 import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSourceInfo } from "../agent-connection/types.js";
-import type { DaemonCommandCompatibility } from "../daemon/daemon-protocol.js";
+import {
+	COMPLETION_WAIT_DIAGNOSTICS_COMPATIBILITY,
+	type DaemonCommandCompatibility,
+} from "../daemon/daemon-protocol.js";
 
-export const RPC_CAPABILITIES = ["rlm_quiescence_barrier"] as const;
+export const RPC_CAPABILITIES = ["rlm_quiescence_barrier", "completion_wait_diagnostics"] as const;
+export const RPC_COMMAND_FIELD_COMPATIBILITY = {
+	wait_for_completion: { timeoutMs: COMPLETION_WAIT_DIAGNOSTICS_COMPATIBILITY },
+} as const;
 export const RPC_COMMAND_COMPATIBILITY = {
 	wait_for_completion: { minProtocol: 13, minSchemaRevision: 51, capability: "rlm_quiescence_barrier" },
 } as const satisfies Partial<Record<RpcCommand["type"], DaemonCommandCompatibility>>;
 export const RPC_RESPONSE_FIELD_COMPATIBILITY = {
+	wait_for_completion: { errorInfo: COMPLETION_WAIT_DIAGNOSTICS_COMPATIBILITY },
 	get_state: { capabilities: RPC_COMMAND_COMPATIBILITY.wait_for_completion },
 } as const;
 // This additive command changes no session-event fields or their compatibility.
@@ -46,7 +54,7 @@ export type RpcCommand =
 
 	// State
 	| { id?: string; type: "get_state" }
-	| { id?: string; type: "wait_for_completion" }
+	| { id?: string; type: "wait_for_completion"; timeoutMs?: number }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -309,7 +317,14 @@ export type RpcResponse =
 	  }
 
 	// Error response (any command can fail)
-	| { id?: string; type: "response"; command: string; success: false; error: string };
+	| {
+			id?: string;
+			type: "response";
+			command: string;
+			success: false;
+			error: string;
+			errorInfo?: { code: "completion_wait_timeout" } & CompletionWaitDiagnostics;
+	  };
 
 // ============================================================================
 // Extension UI Events (stdout)

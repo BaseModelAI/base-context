@@ -78,6 +78,29 @@ synchronously — including direct fd writes — precedes its `done`. Ordering
 between a cell's Python-level writes and its raw fd writes is not guaranteed
 (two channels).
 
+## Transport limits
+
+Protocol version remains `4`. The limits below do not change cell attribution.
+Python-level stdout/stderr writes are split losslessly into events of at most
+65,536 Python characters. The host captures the full incoming stream before
+preview clipping.
+
+Result text, error `evalue`, and the combined error traceback are each capped
+at 1,048,576 Python characters; error `ename` is capped at 1,024. A capped event
+keeps its head and tail with a truncation marker and adds optional
+`upstreamTruncated: true`. Hosts that support this metadata mark retained
+`captureComplete` and `outputComplete` false. Older hosts ignore the optional
+field; the marker alone must not imply a complete retained artifact.
+
+Display and host-request `data` must fit 16 × 1024 × 1024 encoded JSON
+characters, using Python's `ensure_ascii=True` encoding and compact separators.
+Oversized or invalid payloads raise before a host request is registered.
+The host's linear newline parser accepts at most 32 × 1024 × 1024 encoded JSON
+characters per frame, counted after UTF-8 decoding. An oversized line fails
+through the existing protocol-frame failure path instead of accumulating
+without bound. These limits bound transport, not user `repr` computation or
+object construction before emission.
+
 ## Execution
 
 Cells compile with `PyCF_ALLOW_TOP_LEVEL_AWAIT` and run as tasks on the
@@ -162,8 +185,8 @@ model tool and requires no extra startup service.
 
 ## Snapshot / restore
 
-`snapshot` serializes the user namespace with `dill` (recurse mode), one name
-at a time: `_`-prefixed names and
+`snapshot` serializes the user namespace with `dill` (recurse mode), once per
+name, into a one-pass record file. `_`-prefixed names and
 `{rlm, mcp, bash, asyncio, In, Out, get_ipython, exit, quit, open}` are always
 skipped; a name whose pickle exceeds `max_variable_bytes` or would push the
 total over `max_bytes` is skipped and reported. With `prune_oversized`, only
@@ -175,11 +198,34 @@ payload is written atomically (tmp file + `os.replace`) and a JSON manifest
 `timestamp`) is written to `manifest_path`. A manifest write failure fails the
 snapshot (and nothing is pruned).
 
-`restore` loads the payload and revives each name independently; a missing
-file yields an ok empty restore with `reason:"snapshot not found"`, a corrupt
-file fails with a `reason`, and per-name failures are listed in `failed`.
-Names `In`, `Out`, and `get_ipython` in a payload are never restored. `dill` is imported lazily; when unavailable, snapshot and restore
-fail with `status:"error"` and a `reason`.
+The V2 payload starts with `BCREPL\0\2`, followed by records containing a
+4-byte big-endian UTF-8 name length, an 8-byte big-endian pickle length, the
+name bytes, and the pickle bytes. Aggregate accounting includes the header,
+record lengths, and names. The JSON manifest schema remains version 1.
+New runtimes also read the legacy V1 dill dictionary payload. Older runtimes
+cannot read V2 payloads: preserve a V1 snapshot before rolling back the runtime,
+or start without restored state. This is a snapshot-format change, not a wire
+protocol version change.
+
+`restore` stages all names before applying them under the interrupt shield.
+A missing file yields an ok empty restore with `reason:"snapshot not found"`;
+a corrupt record fails without applying staged names. Per-name unpickling
+failures are listed in `failed`, while other names can still restore. Restore
+never replaces the on-disk snapshot. Bootstrap-managed names are not restored.
+
+Restored user functions use the live REPL globals. Missing saved globals are
+backfilled without replacing existing live names. Function metadata, closures,
+and aliases within each serialized object graph are retained through supported
+containers and user classes, including populated inherited slots. Unset slots
+stay unset. Separate top-level records do not promise shared object identity.
+`BashHandle` refuses serialization because it owns process resources. Guarded loading also refuses saved `BashHandle` references from older
+snapshots, and rejects dill file handles backed by raw integer
+file descriptors before reopening them, including in legacy payloads. Ordinary
+path-backed file restoration remains supported. These guards do not make dill
+safe for untrusted snapshots.
+
+`dill` is imported lazily; when unavailable, snapshot and restore fail with
+`status:"error"` and a `reason`.
 
 `list_names` replies with `done` carrying `names`: the sorted user-defined
 top-level names under the same filter the snapshot applies.

@@ -1109,15 +1109,22 @@ async function executePreparedToolCall(
 	});
 	// Observe early failures now; the normal execution path still awaits and reports them.
 	void updateEvents.catch(() => undefined);
+	let updateFailure: { error: unknown } | undefined;
+	const finishUpdatesIfReady = () => {
+		if (acceptingUpdates || pendingUpdates > 0) return;
+		if (updateFailure) failUpdates(updateFailure.error);
+		else finishUpdates();
+	};
 	const settleUpdate = () => {
 		pendingUpdates--;
-		if (!acceptingUpdates && pendingUpdates === 0) finishUpdates();
+		finishUpdatesIfReady();
 	};
 	const stopUpdates = () => {
 		acceptingUpdates = false;
-		if (pendingUpdates === 0) finishUpdates();
+		finishUpdatesIfReady();
 	};
 	let executionStarted = false;
+	let executionCompleted = false;
 
 	try {
 		throwIfAborted(signal);
@@ -1139,11 +1146,12 @@ async function executePreparedToolCall(
 				// Do not retain every stdout callback or feed an unbounded array to Promise.all.
 				pendingUpdates++;
 				void update.then(settleUpdate, (error) => {
-					failUpdates(error);
+					updateFailure ??= { error };
 					settleUpdate();
 				});
 			});
 		const result = await raceWithAbort(source.owner ? source.owner.run(run) : run(), signal);
+		executionCompleted = true;
 		stopUpdates();
 		try {
 			await raceWithAbort(updateEvents, signal);
@@ -1162,7 +1170,13 @@ async function executePreparedToolCall(
 			),
 			isError: true,
 			...(executionStarted ? { executedInput } : {}),
-			executionOutcome: !executionStarted ? "not_started" : signal?.aborted ? "outcome_unknown" : "failed",
+			executionOutcome: executionCompleted
+				? "completed"
+				: !executionStarted
+					? "not_started"
+					: signal?.aborted
+						? "outcome_unknown"
+						: "failed",
 		};
 	}
 }

@@ -5,7 +5,14 @@ import type { IdleEvictionMinutes } from "../../core/session-action-store.js";
 export { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../../core/session-lease.js";
 
 import type { WorkerRosterEntry } from "./agent-roster.js";
-import type { DaemonClientCapability, DaemonCommand, DaemonOutbound } from "./daemon-protocol.js";
+import {
+	COMPLETION_WAIT_DIAGNOSTICS_COMPATIBILITY,
+	type DaemonClientCapability,
+	type DaemonCommand,
+	type DaemonCommandCompatibility,
+	type DaemonOutbound,
+	STATUS_SUMMARY_INTEREST_COMPATIBILITY,
+} from "./daemon-protocol.js";
 
 export const DAEMON_WORKER_ROLE_ENV = "BASE_CONTEXT_INTERNAL_DAEMON_WORKER";
 export const DAEMON_WORKER_TOKEN_ENV = "BASE_CONTEXT_INTERNAL_DAEMON_WORKER_TOKEN";
@@ -159,6 +166,8 @@ export type DaemonWorkerCommand =
 			supportsExtensionUi?: boolean;
 	  }
 	| { id?: string; type: "worker_unsubscribe"; activeSessionId: string }
+	| { id?: string; type: "worker_set_status_summary_interest"; observed: boolean }
+	| { id?: string; type: "worker_cancel_completion_wait"; waitId: string }
 	| { id?: string; type: "worker_register_peer_transport"; grant: DaemonWorkerPeerGrant }
 	| { id?: string; type: "worker_archive_and_shutdown" }
 	| { id?: string; type: "worker_get_rlm_capacity" }
@@ -189,6 +198,11 @@ export type DaemonWorkerCommand =
 	| { id?: string; type: "worker_prepare_update" }
 	| { id?: string; type: "worker_commit_update" }
 	| { id?: string; type: "worker_cancel_update" };
+
+export const DAEMON_WORKER_COMMAND_COMPATIBILITY = {
+	worker_set_status_summary_interest: STATUS_SUMMARY_INTEREST_COMPATIBILITY,
+	worker_cancel_completion_wait: COMPLETION_WAIT_DIAGNOSTICS_COMPATIBILITY,
+} as const satisfies Partial<Record<DaemonWorkerCommand["type"], DaemonCommandCompatibility>>;
 
 export type DaemonWorkerCommandBody = DaemonWorkerCommand extends infer TCommand
 	? TCommand extends { id?: string }

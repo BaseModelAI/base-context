@@ -12,7 +12,7 @@ import { type AgentAutonomousStatus, type AutonomousLimitReason, autonomousLimit
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.js";
 import { killTrackedDetachedChildren } from "../utils/shell.js";
 import { InProcessAgentConnection } from "./agent-connection/in-process-agent-connection.js";
-import type { AgentConnection } from "./agent-connection/types.js";
+import type { AgentConnection, AgentConnectionSessionEvent } from "./agent-connection/types.js";
 import { latestAutonomousGateAttempt, selectHeadlessTerminalResult } from "./headless-completion.js";
 
 /**
@@ -21,12 +21,38 @@ import { latestAutonomousGateAttempt, selectHeadlessTerminalResult } from "./hea
 export interface PrintModeOptions {
 	/** Output mode: "text" for final response only, "json" for all events */
 	mode: "text" | "json";
+	/** Omit cumulative message snapshots from JSON updates. */
+	jsonDeltas?: boolean;
 	/** Array of additional prompts to send after initialMessage */
 	messages?: string[];
 	/** First message to send (may contain @file content) */
 	initialMessage?: string;
 	/** Images to attach to the initial message */
 	initialImages?: ImageContent[];
+}
+
+function createJsonDeltaProjection(): (event: AgentConnectionSessionEvent) => object {
+	let messageId = 0;
+	return (event) => {
+		if ((event.type === "message_start" || event.type === "message_end") && event.message.role === "assistant") {
+			if (event.type === "message_start") messageId++;
+			return { ...event, messageId };
+		}
+		if (event.type !== "message_update") return event;
+
+		const update = event.assistantMessageEvent;
+		if (!("partial" in update)) {
+			return { type: event.type, messageId, assistantMessageEvent: update };
+		}
+		const { partial, ...delta } = update;
+		const toolCall = update.type === "toolcall_start" ? partial.content[update.contentIndex] : undefined;
+		return {
+			type: event.type,
+			messageId,
+			assistantMessageEvent:
+				toolCall?.type === "toolCall" ? { ...delta, toolCall: { id: toolCall.id, name: toolCall.name } } : delta,
+		};
+	};
 }
 
 function describeAutonomousLimit(status: AgentAutonomousStatus, reason: AutonomousLimitReason): string {
@@ -65,6 +91,7 @@ async function runPrintModeWithConnectionInternal(
 	bindHeadlessExtensions?: () => Promise<void>,
 ): Promise<number> {
 	const { mode, messages = [], initialMessage, initialImages } = options;
+	const projectJsonEvent = options.jsonDeltas ? createJsonDeltaProjection() : undefined;
 	let exitCode = 0;
 	let disposed = false;
 	let unsubscribe: (() => void) | undefined;
@@ -103,7 +130,7 @@ async function runPrintModeWithConnectionInternal(
 
 		unsubscribe = connection.subscribe((event) => {
 			if (mode === "json" && event.type === "session_event") {
-				writeRawStdout(`${JSON.stringify(event.event)}\n`);
+				writeRawStdout(`${JSON.stringify(projectJsonEvent ? projectJsonEvent(event.event) : event.event)}\n`);
 			}
 			if (event.type === "extension_error") {
 				console.error(`Extension error (${event.extensionPath}): ${event.error}`);

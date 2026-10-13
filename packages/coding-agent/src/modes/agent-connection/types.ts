@@ -640,6 +640,8 @@ export type AgentConnectionBeforeSessionInvalidateListener = () => void;
 export interface AgentConnectionHeadlessCompletionOptions {
 	/** Wait for descendant terminal publication and the parent turns it triggers. */
 	waitForRlmQuiescence?: boolean;
+	/** Stop waiting after this duration without cancelling session work. */
+	timeoutMs?: number;
 }
 
 export interface AgentConnectionSessionInputPause {

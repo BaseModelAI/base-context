@@ -8,6 +8,7 @@ import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type { CompactionResult } from "../../core/compaction/index.js";
+import { validateCompletionTimeout } from "../../core/completion.js";
 import type { ContextTreeNode } from "../../core/context-tree.js";
 import type {
 	AgentCronJob,
@@ -1131,6 +1132,10 @@ export class DaemonAgentConnection implements AgentConnection {
 	}
 
 	async waitForHeadlessCompletion(options?: AgentConnectionHeadlessCompletionOptions): Promise<AgentAutonomousStatus> {
+		validateCompletionTimeout(options?.timeoutMs);
+		if (options?.timeoutMs !== undefined && !this.client.supportsServerCapability("completion_wait_diagnostics")) {
+			throw new Error("the daemon does not support completion wait deadlines; omit timeoutMs or restart the daemon");
+		}
 		if (options?.waitForRlmQuiescence && !this.client.supportsServerCapability("rlm_quiescence_barrier")) {
 			throw new Error(
 				"the daemon is running an older build without RLM quiescence barriers; restart the daemon and try again",
@@ -1141,8 +1146,9 @@ export class DaemonAgentConnection implements AgentConnection {
 				type: "wait_for_headless_completion",
 				activeSessionId: this.activeSessionId,
 				...(options?.waitForRlmQuiescence ? { waitForRlmQuiescence: true } : {}),
+				...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
 			},
-			DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS,
+			Math.max(DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS, (options?.timeoutMs ?? 0) + 1000),
 		);
 	}
 

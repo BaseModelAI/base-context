@@ -2,7 +2,9 @@ import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { type HostRequestHandlers, ReplKernelManager } from "../src/core/kernel/index.js";
+import type { ExtensionContext } from "../src/core/extensions/types.js";
+import { type HostRequestHandlers, type KernelExecutionHandle, ReplKernelManager } from "../src/core/kernel/index.js";
+import { createIpythonToolDefinition, IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 
 type ShutdownInternals = {
 	state: "running";
@@ -58,6 +60,12 @@ function configuredManager(
 		state: "running",
 		writeLine: vi.fn(async (request: Record<string, unknown>) => onSend(request, internals)),
 		child,
+	});
+	child.kill.mockImplementation(() => {
+		if (child.exitCode === null && child.signalCode === null) {
+			queueMicrotask(() => child.emit("exit", null, "SIGKILL"));
+		}
+		return true;
 	});
 	// Attach the real exit/error handlers so teardown-ownership races are exercised.
 	internals.wireChild(child);
@@ -242,11 +250,20 @@ describe("ReplKernelManager graceful shutdown", () => {
 		);
 		const child = internals.child;
 
-		const shutdown = manager.shutdown({ snapshot: true });
+		vi.mocked(child.kill).mockImplementation(() => true);
+		let settled = false;
+		const shutdown = manager.shutdown({ snapshot: true }).then((result) => {
+			settled = true;
+			return result;
+		});
 		await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
-		await manager.kill();
+		const killed = manager.kill();
 		releaseSnapshot?.();
+		await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
 
+		expect(settled).toBe(false);
+		child.emit("exit", null, "SIGKILL");
+		await killed;
 		await expect(shutdown).resolves.toBe(false);
 		expect(child.kill).toHaveBeenCalledOnce();
 	});
@@ -269,16 +286,145 @@ describe("ReplKernelManager graceful shutdown", () => {
 	});
 
 	it("restart does not resurrect a kernel a concurrent kill superseded", async () => {
-		const { manager } = configuredManager((_request, state) => {
+		const { manager } = configuredManager(() => {
 			// A concurrent kill supersedes the in-flight graceful shutdown.
 			void manager.kill();
-			state.child.emit("exit", null, "SIGKILL");
 		});
 		const start = vi.spyOn(manager, "start").mockResolvedValue(undefined);
 
 		await manager.restart();
 
 		expect(start).not.toHaveBeenCalled();
+	});
+
+	it("keeps an IPython execution pending until the killed interpreter exits", async () => {
+		const { manager, internals } = configuredManager(() => {});
+		const child = internals.child;
+		vi.mocked(child.kill).mockImplementation(() => true);
+		const provisioner = new IpythonKernelProvisioner(process.cwd());
+		vi.spyOn(provisioner, "ensure").mockResolvedValue(manager);
+		const tool = createIpythonToolDefinition(process.cwd(), { provisioner, foregroundWaitMs: 0 });
+		const ctx = {} as ExtensionContext;
+		const pending = await tool.execute("cell", { code: "unsettled()" }, undefined, undefined, ctx);
+		const executionId = pending.details?.executionId;
+		expect(executionId).toBeTypeOf("string");
+		const killed = manager.kill();
+		try {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			const status = await tool.execute(
+				"status",
+				{ action: "status", execution_id: executionId },
+				undefined,
+				undefined,
+				ctx,
+			);
+			expect(status.details?.status).toBe("pending");
+		} finally {
+			child.emit("exit", null, "SIGKILL");
+			await killed;
+		}
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		await expect(
+			tool.execute("collected", { action: "status", execution_id: executionId }, undefined, undefined, ctx),
+		).rejects.toThrow("Kernel has been shut down");
+	});
+
+	it("retires a failed request writer and keeps IPython pending until that child exits", async () => {
+		const { manager, internals } = configuredManager(() => {
+			throw new Error("write EPIPE");
+		});
+		const child = internals.child;
+		vi.mocked(child.kill).mockImplementation(() => true);
+		const provisioner = new IpythonKernelProvisioner(process.cwd());
+		vi.spyOn(provisioner, "ensure").mockResolvedValue(manager);
+		const tool = createIpythonToolDefinition(process.cwd(), { provisioner, foregroundWaitMs: 0 });
+		const ctx = {} as ExtensionContext;
+		try {
+			const pending = await tool.execute("cell", { code: "possibly_sent()" }, undefined, undefined, ctx);
+			const executionId = pending.details?.executionId;
+			expect(executionId).toBeTypeOf("string");
+			expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+			expect(manager.isRunning).toBe(false);
+			const status = await tool.execute(
+				"status",
+				{ action: "status", execution_id: executionId },
+				undefined,
+				undefined,
+				ctx,
+			);
+			expect(status.details?.status).toBe("pending");
+			child.emit("exit", null, "SIGKILL");
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			await expect(
+				tool.execute("collect", { action: "status", execution_id: executionId }, undefined, undefined, ctx),
+			).rejects.toThrow("write EPIPE");
+		} finally {
+			child.emit("exit", null, "SIGKILL");
+			await manager.kill();
+		}
+	});
+
+	it("settles an admission callback failure without waiting for an unsent request", async () => {
+		const { manager, internals } = configuredManager(() => {});
+		let execution: KernelExecutionHandle | undefined;
+		try {
+			await expect(
+				manager.execute("not_sent()", {
+					onExecutionStarted: (handle) => {
+						execution = handle;
+						throw new Error("admission observer failed");
+					},
+				}),
+			).rejects.toThrow("admission observer failed");
+			expect(execution).toBeDefined();
+			await execution!.settled;
+			expect(internals.writeLine).not.toHaveBeenCalled();
+			expect(manager.isRunning).toBe(true);
+		} finally {
+			await manager.kill();
+		}
+	});
+
+	it("propagates lazy restore cleanup failure without an unhandled rejection", async () => {
+		const { manager, internals } = configuredManager(() => {}, undefined, true);
+		const child = internals.child;
+		Object.assign(manager, { pendingRestore: true });
+		vi.spyOn(manager as unknown as { performRestore: () => Promise<null> }, "performRestore").mockResolvedValue(null);
+		vi.mocked(child.kill).mockImplementation(() => {
+			throw new Error("signal refused after failed restore");
+		});
+		try {
+			await expect(manager.execute("not_sent()")).rejects.toThrow("signal refused after failed restore");
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(internals.writeLine).not.toHaveBeenCalled();
+			await expect(manager.start()).rejects.toThrow("signal refused after failed restore");
+		} finally {
+			child.emit("exit", null, "SIGKILL");
+		}
+	});
+
+	it("kill joins physical exit and propagates cleanup failure", async () => {
+		const { manager, internals } = configuredManager(() => {});
+		const child = internals.child;
+		vi.mocked(child.kill).mockImplementation(() => true);
+		let settled = false;
+		const first = manager.kill().then(() => {
+			settled = true;
+		});
+		const second = manager.kill();
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		child.emit("exit", null, "SIGKILL");
+		await Promise.all([first, second]);
+		expect(settled).toBe(true);
+
+		const failed = configuredManager(() => {});
+		vi.mocked(failed.internals.child.kill).mockImplementation(() => {
+			throw new Error("signal refused");
+		});
+		await expect(failed.manager.kill()).rejects.toThrow("signal refused");
+		await expect(failed.manager.shutdown()).rejects.toThrow("signal refused");
+		await expect(failed.manager.start()).rejects.toThrow("signal refused");
 	});
 
 	it("kill() destroys stderr only while the child has not exited", async () => {
@@ -294,6 +440,7 @@ describe("ReplKernelManager graceful shutdown", () => {
 		const exited = configuredManager(() => {});
 		const exitedChild = exited.internals.child;
 		exitedChild.exitCode = 42;
+		exitedChild.emit("exit", 42, null);
 		await exited.manager.kill();
 		expect(exitedChild.stderr?.destroy).not.toHaveBeenCalled();
 	});

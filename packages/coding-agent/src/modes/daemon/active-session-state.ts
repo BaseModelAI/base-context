@@ -19,6 +19,8 @@ export interface DaemonSocketClient {
 	catchupRetryTimer?: NodeJS.Timeout;
 	backpressured?: boolean;
 	rosterSubscribed?: boolean;
+	statusSummaryInterest?: boolean;
+	completionWaitControllers?: Map<string, AbortController>;
 	/** A push hit backpressure; one full-roster resync goes out on drain. */
 	rosterResyncPending?: boolean;
 	authenticated?: boolean;

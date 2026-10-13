@@ -22,6 +22,7 @@ export interface Args {
 	help?: boolean;
 	version?: boolean;
 	mode?: Mode;
+	jsonDeltas?: boolean;
 	/** RPC clients must understand this event protocol, including refusal-only agent_end. */
 	rpcProtocolVersion?: number;
 	daemonSocket?: string;
@@ -118,6 +119,8 @@ export function parseArgs(args: string[]): Args {
 					});
 				}
 			}
+		} else if (arg === "--json-deltas") {
+			result.jsonDeltas = true;
 		} else if (arg === "--rpc-protocol-version") {
 			if (hasRequiredOptionValue(args, i, arg, result)) result.rpcProtocolVersion = Number(args[++i]);
 		} else if (arg === "--daemon-socket") {
@@ -363,6 +366,10 @@ export function parseArgs(args: string[]): Args {
 		} else if (!arg.startsWith("-")) {
 			result.messages.push(arg);
 		}
+	}
+
+	if (result.jsonDeltas && result.mode !== "json" && !result.help && !result.version) {
+		result.diagnostics.push({ type: "error", message: "--json-deltas requires --mode json" });
 	}
 
 	if (result.goalTokenBudget !== undefined && !result.goal) {

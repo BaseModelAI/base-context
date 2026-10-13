@@ -117,6 +117,31 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 		}
 	}, 60_000);
 
+	it("preserves a fatal restore artifact through direct-manager snapshot and shutdown", async () => {
+		const savedDir = mkdtempSync(join(tmpdir(), "prime-agent-repl-fatal-restore-"));
+		const path = join(savedDir, "state.dill");
+		const manifestPath = join(savedDir, "state.json");
+		const createManager = () =>
+			new ReplKernelManager({ python: python as string, cwd: savedDir, snapshot: { path, manifestPath } });
+		const writer = createManager();
+		await writer.execute("keep = 7");
+		await writer.shutdown({ snapshot: true });
+		const saved = readFileSync(path);
+		const malformed = Buffer.concat([saved, Buffer.from([1])]);
+		writeFileSync(path, malformed);
+		const reader = createManager();
+		try {
+			expect(await reader.restoreState()).toBeNull();
+			expect(await reader.snapshotState()).toBeNull();
+			expect(await reader.pruneOversizedVariables()).toBeNull();
+			await reader.shutdown({ snapshot: true });
+			expect(readFileSync(path)).toEqual(malformed);
+		} finally {
+			await reader.shutdown();
+			rmSync(savedDir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
 	it("treats a missing snapshot as an empty restore (clean start)", async () => {
 		const freshDir = mkdtempSync(join(tmpdir(), "prime-agent-repl-state-empty-"));
 		const manager = new ReplKernelManager({

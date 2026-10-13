@@ -1557,24 +1557,23 @@ class RestoreApplyShieldTest(unittest.TestCase):
                 signal.raise_signal(signal.SIGINT)
 
     def test_sigint_during_staging_leaves_namespace_unchanged(self):
-        import dill
-
         from rlm.repl import _restore_state
 
-        real_loads = dill.loads
+        runtime = sys.modules[_restore_state.__module__]
+        real_load = runtime._guarded_snapshot_load
         calls = {"n": 0}
 
-        def loads_then_sigint(blob):
+        def load_then_sigint(stream, serializer):
             calls["n"] += 1
             if calls["n"] == 2:
                 # Synchronous SIGINT mid-deserialize: nothing may have touched ns yet.
                 signal.raise_signal(signal.SIGINT)
-            return real_loads(blob)
+            return real_load(stream, serializer)
 
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write_snapshot(tmp, {"a": 1, "b": 2})
             ns = {"a": "old", "unrelated": "keep"}
-            with mock.patch.object(dill, "loads", loads_then_sigint):
+            with mock.patch.object(runtime, "_guarded_snapshot_load", load_then_sigint):
                 with self.assertRaises(KeyboardInterrupt):
                     _restore_state(ns, path)
         # The old namespace is byte-identical: no partial old/new mixture.
@@ -1683,13 +1682,9 @@ class SnapshotTempCleanupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "kernel-state.dill")
 
-            real_dump = dill.dump
-
             def interrupted_dump(payload, fh):
-                if isinstance(payload, dict):  # the complete payload, not a per-variable value
-                    fh.write(b"partial")
-                    raise KeyboardInterrupt
-                return real_dump(payload, fh)
+                fh.write(b"partial")
+                raise KeyboardInterrupt
 
             with unittest_mock.patch.object(dill, "dump", interrupted_dump):
                 with self.assertRaises(KeyboardInterrupt):
@@ -1784,16 +1779,18 @@ class SnapshotPairConsistencyTest(unittest.TestCase):
         dill.settings["recurse"] = True
         source = {"a": "first", "b": "second"}
         blobs = {name: dill.dumps(value) for name, value in source.items()}
-        cap = len(dill.dumps(blobs)) - 1
-        self.assertLessEqual(sum(map(len, blobs.values())), cap)
-        self.assertLessEqual(len(dill.dumps({"a": blobs["a"]})), cap)
+        runtime = sys.modules[self.snapshot.__module__]
+        cap = len(runtime._SNAPSHOT_MAGIC) + sum(
+            runtime._SNAPSHOT_RECORD.size + len(name.encode("utf-8")) + len(blob)
+            for name, blob in blobs.items()
+        ) - 1
 
         result = self._snap(source, max_bytes=cap, max_variable_bytes=cap)
         self.assertEqual(result["saved"], ["a"])
         self.assertEqual(result["skipped"], [{"name": "b", "reason": "exceeds aggregate snapshot size cap"}])
         self.assertLessEqual(result["bytes"], cap)
         with open(self.path, "rb") as fh:
-            self.assertEqual(list(dill.load(fh)), ["a"])
+            self.assertEqual([name for name, _ in runtime._snapshot_records(fh, dill)], ["a"])
 
     def test_zero_size_cap_writes_no_empty_payload_overhead(self):
         result = self._snap({}, max_bytes=0, max_variable_bytes=0)
@@ -1991,7 +1988,7 @@ class OwnerWatchdogTest(unittest.TestCase):
         # can notice the owner's death and exit the runtime.
         owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
         try:
-            repl = ReplProcess(env={"PRIME_AGENT_KERNEL_OWNER_PID": str(owner.pid)})
+            repl = ReplProcess(env={"BASE_CONTEXT_KERNEL_OWNER_PID": str(owner.pid)})
             self.addCleanup(repl.close)
             repl.ready()
             repl.send({"type": "execute", "id": "busy", "code": "while True: pass"})
@@ -2010,13 +2007,13 @@ class OwnerWatchdogTest(unittest.TestCase):
         self.addCleanup(sys.path.remove, SRC)
         import rlm.repl as repl_module
 
-        with mock.patch.dict(os.environ, {"PRIME_AGENT_KERNEL_OWNER_PID": "4242"}):
+        with mock.patch.dict(os.environ, {"BASE_CONTEXT_KERNEL_OWNER_PID": "4242"}):
             self.assertEqual(repl_module._resolve_owner_pid(), 4242)
         for raw in (None, "", "garbage", "0", "-7"):
-            env = {} if raw is None else {"PRIME_AGENT_KERNEL_OWNER_PID": raw}
+            env = {} if raw is None else {"BASE_CONTEXT_KERNEL_OWNER_PID": raw}
             with mock.patch.dict(os.environ, env, clear=False):
                 if raw is None:
-                    os.environ.pop("PRIME_AGENT_KERNEL_OWNER_PID", None)
+                    os.environ.pop("BASE_CONTEXT_KERNEL_OWNER_PID", None)
                 self.assertEqual(repl_module._resolve_owner_pid(), os.getppid())
 
     def test_owner_watchdog_windows_waits_on_process_handle(self):

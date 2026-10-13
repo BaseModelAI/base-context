@@ -14,6 +14,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import { resolveForegroundWaitMs } from "./ipython-settings.js";
 import { assertRlmMaxSubagents, DEFAULT_RLM_MAX_SUBAGENTS } from "./rlm-max-subagents.js";
 
 const RECENT_MODELS_LIMIT = 20;
@@ -166,6 +167,8 @@ export type McpServerConfig =
 			callTimeoutMs?: number;
 	  };
 
+export type StatusSummariesPolicy = "always" | "observed" | "off";
+
 export interface Settings {
 	onboardingShown?: boolean;
 	onboardingCompleted?: boolean;
@@ -198,6 +201,8 @@ export interface Settings {
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
 	quietStartup?: boolean;
+	foregroundWaitMs?: number; // admitted IPython foreground wait; default: 1000
+	statusSummaries?: StatusSummariesPolicy; // generated status recaps; default: "always"
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
 	mcpServers?: Record<string, McpServerConfig>; // User-declared MCP servers (name → config); built-ins are in the ai/mcp catalog
@@ -1093,6 +1098,15 @@ export class SettingsManager {
 		this.globalSettings.shellPath = path;
 		this.markModified("shellPath");
 		this.save();
+	}
+
+	getForegroundWaitMs(): number {
+		return resolveForegroundWaitMs(this.settings.foregroundWaitMs);
+	}
+
+	getStatusSummaries(): StatusSummariesPolicy {
+		const policy = this.settings.statusSummaries;
+		return policy === "observed" || policy === "off" ? policy : "always";
 	}
 
 	getQuietStartup(): boolean {

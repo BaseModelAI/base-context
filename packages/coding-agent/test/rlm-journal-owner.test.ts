@@ -1,12 +1,18 @@
+import * as childProcess from "node:child_process";
 import { type ChildProcess, execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { RlmJournalOwner } from "../src/core/rlm-journal-owner.js";
 import { RlmSpawnLedger, rlmLedgerPath } from "../src/modes/daemon/rlm-ledger.js";
 import type { RlmLedgerMutation } from "../src/modes/daemon/rlm-ledger-mutations.js";
+
+vi.mock("node:child_process", async (importOriginal) => {
+	const actual = await importOriginal<typeof childProcess>();
+	return { ...actual, fork: vi.fn(actual.fork) };
+});
 
 function actor(owner: RlmJournalOwner): ChildProcess {
 	return (owner as unknown as { child: ChildProcess }).child;
@@ -125,6 +131,22 @@ describe("RLM journal owner process", () => {
 		expect(readFileSync(`${options.journalPath}.legacy-v1`)).toEqual(legacyBytes);
 		await legacyOwner.close();
 		expect(actor(legacyOwner).exitCode).toBe(0);
+	});
+
+	it("joins a failed startup before rejecting without exposing the actor", async () => {
+		const opening = RlmJournalOwner.open({
+			...options,
+			journalPath: join(root, "wrong-scope.jsonl"),
+			nodeExecutable,
+		});
+		const child = vi.mocked(childProcess.fork).mock.results.at(-1)!.value as ChildProcess;
+		const exited = once(child, "exit");
+		try {
+			await expect(opening).rejects.toThrow("RLM journal owner path does not match its ledger scope");
+			expect(child.exitCode).toBe(1);
+		} finally {
+			await exited;
+		}
 	});
 
 	it.skipIf(process.platform === "win32")(

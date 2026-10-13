@@ -13,7 +13,7 @@ import { ModelRegistry } from "../src/core/model-registry.js";
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
-import { DAEMON_PROTOCOL_VERSION } from "../src/modes/daemon/daemon-protocol.js";
+import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_REVISION } from "../src/modes/daemon/daemon-protocol.js";
 import * as rpcJsonl from "../src/modes/rpc/jsonl.js";
 import { RpcClient } from "../src/modes/rpc/rpc-client.js";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.js";
@@ -67,11 +67,25 @@ function getPromptResponses(outputLines: string[], id: string): ParsedOutputLine
 	);
 }
 
+function nextRpcResponse(id: string): Promise<ParsedOutputLine> {
+	return new Promise((resolve) => {
+		rpcIo.onOutput = (line) => {
+			const record = parseOutputLines([line]).find((item) => item.type === "response" && item.id === id);
+			if (record) resolve(record);
+		};
+	});
+}
+
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number; model?: Model<any> }): {
+function createRuntimeHost(options: {
+	withAuth: boolean;
+	responseDelayMs: number;
+	responseRelease?: Promise<void>;
+	model?: Model<any>;
+}): {
 	runtimeHost: AgentSessionRuntime;
 	session: AgentSession;
 	cleanup: () => Promise<void>;
@@ -84,6 +98,7 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 		: registerFauxProvider({ api: "faux-rpc-prompt", provider: "faux-rpc-prompt" });
 	faux?.setResponses([
 		async () => {
+			await options.responseRelease;
 			await sleep(options.responseDelayMs);
 			return fauxAssistantMessage("done");
 		},
@@ -145,7 +160,12 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 	};
 }
 
-async function startRpcMode(options: { withAuth: boolean; responseDelayMs: number; model?: Model<any> }): Promise<{
+async function startRpcMode(options: {
+	withAuth: boolean;
+	responseDelayMs: number;
+	responseRelease?: Promise<void>;
+	model?: Model<any>;
+}): Promise<{
 	lineHandler: (line: string) => void;
 	session: AgentSession;
 	cleanup: () => Promise<void>;
@@ -270,7 +290,11 @@ describe("RPC prompt response semantics", () => {
 			lineHandler(JSON.stringify({ id: "state", type: "get_state" }));
 			expect(await state).toMatchObject({
 				success: true,
-				data: { protocolVersion: 13, schemaRevision: 51, capabilities: ["rlm_quiescence_barrier"] },
+				data: {
+					protocolVersion: DAEMON_PROTOCOL_VERSION,
+					schemaRevision: DAEMON_SCHEMA_REVISION,
+					capabilities: ["rlm_quiescence_barrier", "completion_wait_diagnostics"],
+				},
 			});
 			const completed = response("completed");
 			lineHandler(JSON.stringify({ id: "prompt", type: "prompt", message: "Wait for admission" }));
@@ -294,6 +318,130 @@ describe("RPC prompt response semantics", () => {
 			release();
 			prompt.mockRestore();
 			barrier.mockRestore();
+			await cleanup();
+		}
+	});
+
+	it("times out one RPC completion wait without aborting work and permits a later wait", async () => {
+		let release!: () => void;
+		const responseRelease = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const { lineHandler, session, cleanup } = await startRpcMode({
+			withAuth: true,
+			responseDelayMs: 0,
+			responseRelease,
+		});
+		const abort = vi.spyOn(session, "abort");
+		try {
+			const accepted = nextRpcResponse("held-prompt");
+			lineHandler(JSON.stringify({ id: "held-prompt", type: "prompt", message: "Keep working" }));
+			expect(await accepted).toMatchObject({ success: true });
+			await vi.waitFor(() => expect(session.isStreaming).toBe(true));
+
+			const timedOut = nextRpcResponse("timed-completion");
+			lineHandler(JSON.stringify({ id: "timed-completion", type: "wait_for_completion", timeoutMs: 10 }));
+			const failure = await timedOut;
+			expect(failure).toMatchObject({
+				id: "timed-completion",
+				type: "response",
+				command: "wait_for_completion",
+				success: false,
+				error: "Completion wait timed out",
+				errorInfo: {
+					code: "completion_wait_timeout",
+					complete: false,
+					elapsedMs: expect.any(Number),
+					blockers: expect.arrayContaining([
+						expect.objectContaining({ kind: "streaming", sessionId: session.sessionId }),
+					]),
+				},
+			});
+			expect((failure.errorInfo as { elapsedMs: number }).elapsedMs).toBeGreaterThanOrEqual(10);
+			expect(session.isStreaming).toBe(true);
+			expect(abort).not.toHaveBeenCalled();
+
+			const completed = nextRpcResponse("later-completion");
+			lineHandler(JSON.stringify({ id: "later-completion", type: "wait_for_completion" }));
+			release();
+			expect(await completed).toEqual({
+				id: "later-completion",
+				type: "response",
+				command: "wait_for_completion",
+				success: true,
+			});
+			expect(session.messages.at(-1)).toMatchObject({
+				role: "assistant",
+				stopReason: "stop",
+				content: [{ type: "text", text: "done" }],
+			});
+			expect(abort).not.toHaveBeenCalled();
+		} finally {
+			release();
+			abort.mockRestore();
+			await cleanup();
+		}
+	});
+
+	it("includes prompt admission in the RPC completion deadline without cancelling admission", async () => {
+		const { lineHandler, session, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+		let admit!: () => void;
+		let announce!: () => void;
+		const admission = new Promise<void>((resolve) => {
+			admit = resolve;
+		});
+		const entered = new Promise<void>((resolve) => {
+			announce = resolve;
+		});
+		const prompt = vi.spyOn(session, "prompt").mockImplementation(async (_text, options) => {
+			announce();
+			await admission;
+			options?.preflightResult?.(true);
+		});
+		const barrier = vi.spyOn(session, "waitForRlmQuiescence");
+		const abort = vi.spyOn(session, "abort");
+		try {
+			lineHandler(JSON.stringify({ id: "admitting-prompt", type: "prompt", message: "Await admission" }));
+			await entered;
+			const timedOut = nextRpcResponse("admission-timeout");
+			lineHandler(JSON.stringify({ id: "admission-timeout", type: "wait_for_completion", timeoutMs: 10 }));
+			const failure = await timedOut;
+			expect(failure).toMatchObject({
+				id: "admission-timeout",
+				type: "response",
+				command: "wait_for_completion",
+				success: false,
+				errorInfo: {
+					code: "completion_wait_timeout",
+					complete: false,
+					elapsedMs: expect.any(Number),
+					blockers: [{ kind: "prompt_admission" }],
+				},
+			});
+			expect((failure.errorInfo as { elapsedMs: number }).elapsedMs).toBeGreaterThanOrEqual(10);
+			expect(barrier).not.toHaveBeenCalled();
+			expect(abort).not.toHaveBeenCalled();
+			expect(getPromptResponses(rpcIo.outputLines, "admitting-prompt")).toEqual([]);
+
+			const completed = nextRpcResponse("admitted-completion");
+			lineHandler(JSON.stringify({ id: "admitted-completion", type: "wait_for_completion" }));
+			admit();
+			expect(await completed).toEqual({
+				id: "admitted-completion",
+				type: "response",
+				command: "wait_for_completion",
+				success: true,
+			});
+			expect(getPromptResponses(rpcIo.outputLines, "admitting-prompt")).toEqual([
+				{ id: "admitting-prompt", type: "response", command: "prompt", success: true },
+			]);
+			expect(barrier).toHaveBeenCalledOnce();
+			expect(abort).not.toHaveBeenCalled();
+		} finally {
+			admit();
+			prompt.mockRestore();
+			barrier.mockRestore();
+			abort.mockRestore();
 			await cleanup();
 		}
 	});

@@ -75,6 +75,30 @@ Followed by events as they occur:
 {"type":"agent_end","messages":[...]}
 ```
 
+## Opt-in Delta Updates
+
+```bash
+base-context --mode json --json-deltas "Your prompt"
+```
+
+`--json-deltas` requires `--mode json`. Without this flag, the JSON format above is unchanged.
+
+With the flag:
+
+- Assistant `message_start`, `message_update`, and `message_end` events carry a numeric `messageId`. It starts at 1 and increases for each assistant message in this CLI stream. It is not a provider or saved-session message ID.
+- `message_update` omits its outer `message` and its nested `assistantMessageEvent.partial`. The nested event keeps its `type`, `contentIndex`, and `delta` or end-event content.
+- A nested `toolcall_start` adds `toolCall: {id, name}` from the starting content block. `toolcall_end` keeps the full `toolCall`, including final `arguments`.
+- `message_start` and `message_end` still include their full `message`. Final messages, usage, errors, and all other events remain intact. A response with no deltas still has its final message.
+
+For example, two update lines can be:
+
+```json
+{"type":"message_update","messageId":1,"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello"}}
+{"type":"message_update","messageId":2,"assistantMessageEvent":{"type":"toolcall_start","contentIndex":0,"toolCall":{"id":"call_1","name":"ipython"}}}
+```
+
+Group updates by `messageId` and `contentIndex`. Concatenate text, thinking, or tool-call argument deltas within each block. Use the end event or final message as the complete result; some providers do not emit deltas. This option only changes CLI serialization, not daemon/RPC events or provider behavior.
+
 ## Completion and Errors
 
 JSON mode has the same exit-status rules as text print mode. Terminal assistant errors or aborts, failed session commands, failed compaction, and unfinished autonomous runs stopped by a limit return a nonzero exit status. A configured gate that has not run is not a passed gate. Error diagnostics go to stderr; stdout remains a JSON event stream. Recovered intermediate errors do not by themselves make the final result fail.

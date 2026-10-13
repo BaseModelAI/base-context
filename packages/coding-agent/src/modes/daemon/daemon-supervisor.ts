@@ -38,6 +38,12 @@ import {
 	mergeAgentSessionRuntimeConfig,
 } from "../../core/agent-session-config.js";
 import {
+	CompletionWaitTimeoutError,
+	observeCompletion,
+	validateCompletionTimeout,
+	withCompletionDeadline,
+} from "../../core/completion.js";
+import {
 	type AgentCronJob,
 	AgentCronJobStore,
 	isHeartbeatCronJob,
@@ -85,7 +91,12 @@ import {
 } from "./command-recovery-journal.js";
 import { CompactAssistantStreamReconstructor, isCompactAssistantDelta } from "./compact-session-stream.js";
 import { DAEMON_CATALOG_ROLE_ENV, DaemonCatalogClient } from "./daemon-catalog-process.js";
-import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
+import {
+	annotateDaemonWorkerStartupError,
+	type DaemonWorkerStartupPhase,
+	deserializeDaemonError,
+	serializeDaemonError,
+} from "./daemon-errors.js";
 import {
 	CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	collectDaemonClientEnv,
@@ -720,6 +731,8 @@ export class DaemonSupervisor {
 	private updateRestartPhase?: "draining" | "fencing" | "prepared";
 	private readonly mutationDrain = new MutationDrainLatch();
 	private readonly clients = new Set<DaemonSocketClient>();
+	private readonly statusSummaryInterests = new WeakMap<DaemonWorkerClient, boolean>();
+	private readonly statusSummaryInterestUpdates = new WeakSet<DaemonWorkerClient>();
 	private readonly connectionIds = new WeakMap<DaemonSocketClient, string>();
 	private readonly sessionInputPauseEpochs = new WeakMap<DaemonSocketClient, number>();
 	private readonly detachingInputPauseSessions = new WeakMap<DaemonSocketClient, Set<string>>();
@@ -1520,6 +1533,7 @@ export class DaemonSupervisor {
 				this.log(`Failed to release input pauses for disconnected client ${ownerClientId}: ${String(error)}`),
 			);
 			this.clients.delete(client);
+			if (client.rosterSubscribed) this.syncStatusSummaryInterest();
 			this.cancelWaitingPromptAdmissionsForClient(client);
 			for (const activeSessionId of [...client.attachedActiveSessionIds]) {
 				client.attachedActiveSessionIds.delete(activeSessionId);
@@ -1804,6 +1818,14 @@ export class DaemonSupervisor {
 			return;
 		}
 		const command = preParsed.command;
+		if (command.type === "wait_for_headless_completion") {
+			try {
+				this.write(client, await this.waitForWorkerCompletion(client, command, preParsed.envelopeClientId));
+			} catch (error) {
+				this.write(client, failure(command.id, command.type, error, serializeDaemonError(error)));
+			}
+			return;
+		}
 		const parsedAdmission = preParsed.admission;
 		if (command.type === "cancel_prompt_admission" && this.updateRestartPhase !== undefined) {
 			this.write(client, failure(command.id, command.type, "Daemon is preparing an update restart"));
@@ -2185,11 +2207,15 @@ export class DaemonSupervisor {
 				return undefined;
 			case "list":
 				return this.handleList(client, command);
+			case "wait_for_headless_completion":
+				return this.waitForWorkerCompletion(client, command);
 			case "roster_subscribe":
 				client.rosterSubscribed = true;
+				this.syncStatusSummaryInterest();
 				return success(command.id, command.type, { roster: this.rosterEntriesForClient() });
 			case "roster_unsubscribe":
 				client.rosterSubscribed = false;
+				this.syncStatusSummaryInterest();
 				client.rosterResyncPending = false;
 				return success(command.id, command.type);
 			case "list_agent_peers": {
@@ -3417,7 +3443,7 @@ export class DaemonSupervisor {
 			errno === "EMFILE" || errno === "ENFILE"
 				? ` (${this.workers.size} resident session workers are holding file descriptors; stop unused sessions or raise the open-file limit (ulimit -n))`
 				: "";
-		return new Error(`Failed to spawn session worker: ${error.message}${hint}`);
+		return new Error(`Failed to spawn session worker: ${error.message}${hint}`, { cause: error });
 	}
 
 	private async launchWorker(
@@ -3429,6 +3455,7 @@ export class DaemonSupervisor {
 		if (existing && this.isWorkerRecoveryCancelled(existing)) {
 			throw new Error(`Session worker ${existing.descriptor.workerId} recovery was cancelled`);
 		}
+		let startupPhase: DaemonWorkerStartupPhase = { name: "admission", observedAt: new Date().toISOString() };
 		const recoveryStopRevision = existing?.stopRevision;
 		const launchEnv = command.launchEnv ?? existing?.launchEnv;
 		const createCommand: DaemonCreateCommand = {
@@ -3466,23 +3493,36 @@ export class DaemonSupervisor {
 		});
 		delete workerEnvironment.BASE_CONTEXT_RLM_DEPTH;
 		await this.assertRecoveryAllowed();
-		const child: ChildProcess = spawn(launch.command, launch.args, {
-			cwd: createCommand.config?.cwd ?? process.cwd(),
-			detached: true,
-			env: workerEnvironment,
-			stdio: ["ignore", "ignore", "pipe", "pipe"],
-		});
+		let child: ChildProcess;
+		try {
+			child = spawn(launch.command, launch.args, {
+				cwd: createCommand.config?.cwd ?? process.cwd(),
+				detached: true,
+				env: workerEnvironment,
+				stdio: ["ignore", "ignore", "pipe", "pipe"],
+			});
+		} catch (error) {
+			throw annotateDaemonWorkerStartupError(error, startupPhase);
+		}
 		const detachWorkerStderr = child.stderr
 			? attachJsonlLineReader(child.stderr, (line) => this.log(`Session worker ${workerId} stderr: ${line}`), {
 					maxLineLength: 64 * 1024,
 					onLineOverflow: (prefix) => this.log(`Session worker ${workerId} stderr: ${prefix} [truncated]`),
 				})
 			: () => {};
-		child.once("close", detachWorkerStderr);
+		child.once("close", (code, signal) => {
+			detachWorkerStderr();
+			this.log(
+				`Session worker ${workerId} process closed: pid=${child.pid ?? "unknown"}, instance=${workerInstanceId}, exitCode=${code ?? "unknown"}, signal=${signal ?? "none"}, lastStartupPhase=${startupPhase.name}, startupPhaseObservedAt=${startupPhase.observedAt}`,
+			);
+		});
 		const childClosed = new Promise<void>((resolveClose) => child.once("close", () => resolveClose()));
 		let spawnFailure: Error | undefined;
 		const spawnSettled = new Promise<void>((resolveSpawn) => {
-			child.once("spawn", () => resolveSpawn());
+			child.once("spawn", () => {
+				startupPhase = { name: "spawn", observedAt: new Date().toISOString() };
+				resolveSpawn();
+			});
 			child.once("error", (error) => {
 				spawnFailure = error instanceof Error ? error : new Error(String(error));
 				resolveSpawn();
@@ -3559,6 +3599,7 @@ export class DaemonSupervisor {
 			worker.intentionalStop = false;
 			this.workers.set(workerId, worker);
 		} catch (error) {
+			annotateDaemonWorkerStartupError(error, startupPhase);
 			if (startupGate instanceof Writable) {
 				startupGate.destroy();
 			}
@@ -3590,6 +3631,7 @@ export class DaemonSupervisor {
 				child.unref();
 			}
 			const client = await this.connectWorker(worker, WORKER_CONNECT_TIMEOUT_MS);
+			startupPhase = { name: "handshake", observedAt: new Date().toISOString() };
 			const response = await client.request(withoutCommandId(createCommand), WORKER_REQUEST_TIMEOUT_MS);
 			if (!response.success) {
 				throw deserializeDaemonError(response);
@@ -3601,6 +3643,7 @@ export class DaemonSupervisor {
 			if ((summary.activeSessionId ?? summary.id) !== rootActiveSessionId) {
 				throw new Error("Session worker did not preserve its assigned active session id");
 			}
+			startupPhase = { name: "session-open", observedAt: new Date().toISOString() };
 			this.writeRosterEntry(workerRosterEntryFromSummary(summary), worker);
 			worker.descriptor.rootSessionId = summary.sessionId;
 			worker.descriptor.sessionFile = summary.sessionFile;
@@ -3622,6 +3665,7 @@ export class DaemonSupervisor {
 			this.broadcastHeartbeatsChanged();
 			return worker;
 		} catch (error) {
+			annotateDaemonWorkerStartupError(error, startupPhase);
 			if (isSupervisorGenerationStale(error)) {
 				throw error;
 			}
@@ -3720,6 +3764,7 @@ export class DaemonSupervisor {
 					worker.lastFrameAt = Date.now();
 					worker.client?.close();
 					worker.client = client;
+					this.syncStatusSummaryInterest(worker);
 					worker.compatibilityError = undefined;
 					worker.descriptor.lastError = undefined;
 					return client;
@@ -3758,6 +3803,34 @@ export class DaemonSupervisor {
 		this.persistWorker(worker);
 		this.markWorkerRosterEntries(worker, "recovering");
 		this.log(`Kept incompatible worker ${worker.descriptor.workerId}: ${error.message}`);
+	}
+
+	private syncStatusSummaryInterest(target?: ResidentWorker): void {
+		const observed = [...this.clients].some((client) => client.rosterSubscribed === true);
+		for (const worker of target ? [target] : this.workers.values()) {
+			const client = worker.client;
+			if (!client?.supportsServerCapability("status_summary_interest")) continue;
+			if (this.statusSummaryInterestUpdates.has(client) || this.statusSummaryInterests.get(client) === observed)
+				continue;
+			this.statusSummaryInterests.set(client, observed);
+			this.statusSummaryInterestUpdates.add(client);
+			void client
+				.requestWorker({ type: "worker_set_status_summary_interest", observed })
+				.then((response) => {
+					if (!response.success) throw deserializeDaemonError(response);
+				})
+				.catch((error: unknown) => {
+					if (this.statusSummaryInterests.get(client) === observed) this.statusSummaryInterests.delete(client);
+					this.log(
+						`Status summary interest unavailable for worker ${worker.descriptor.workerId}: ${String(error)}`,
+					);
+				})
+				.finally(() => {
+					this.statusSummaryInterestUpdates.delete(client);
+					const current = [...this.clients].some((peer) => peer.rosterSubscribed === true);
+					if (worker.client === client && current !== observed) this.syncStatusSummaryInterest(worker);
+				});
+		}
 	}
 
 	private async subscribeWorker(worker: ResidentWorker, activeSessionId: string): Promise<void> {
@@ -4089,7 +4162,7 @@ export class DaemonSupervisor {
 			const client = worker.client;
 			if (client) {
 				this.handleWorkerClose(worker, client, error);
-				client.close();
+				client.close(error);
 			}
 		}
 	}
@@ -5379,6 +5452,98 @@ export class DaemonSupervisor {
 			throw new Error(`Ambiguous resident session path "${sessionFile}"`);
 		}
 		return matches.values().next().value;
+	}
+
+	private async waitForWorkerCompletion(
+		client: DaemonSocketClient,
+		command: Extract<DaemonCommand, { type: "wait_for_headless_completion" }>,
+		envelopeClientId?: string,
+	): Promise<DaemonResponse> {
+		validateCompletionTimeout(command.timeoutMs);
+		const startedAt = performance.now();
+		const controller = new AbortController();
+		const closed = () => controller.abort(new Error("Completion wait client disconnected"));
+		client.socket.once("close", closed);
+		if (client.socket.destroyed) closed();
+		try {
+			let phase = "supervisor_admission";
+			const match = await withCompletionDeadline(
+				async (signal) => {
+					await observeCompletion(this.ready, signal);
+					signal?.throwIfAborted();
+					if (envelopeClientId) {
+						this.protocolClientIds.set(client, envelopeClientId);
+						client.id = envelopeClientId;
+					}
+					this.cancelOwnedWorkerCleanup(client.id);
+					await observeCompletion(this.assertServingCurrentOwnership(false), signal);
+					signal?.throwIfAborted();
+					phase = "worker_routing";
+					return observeCompletion(this.findWorkerForClient(client, command.activeSessionId), signal);
+				},
+				{
+					timeoutMs: command.timeoutMs,
+					signal: controller.signal,
+					getBlockers: () => [{ kind: phase, id: command.activeSessionId }],
+				},
+			);
+			controller.signal.throwIfAborted();
+			const workerClient = this.requireAvailableWorkerClient(match.worker);
+			const waitId = workerClient.supportsServerCapability("completion_wait_diagnostics") ? randomUUID() : undefined;
+			const remaining =
+				command.timeoutMs === undefined
+					? undefined
+					: Math.max(0, command.timeoutMs - (performance.now() - startedAt));
+			const request = workerClient.request(
+				{
+					type: "wait_for_headless_completion",
+					activeSessionId: match.summary.activeSessionId ?? match.summary.id,
+					waitForRlmQuiescence: command.waitForRlmQuiescence,
+					...(remaining !== undefined ? { timeoutMs: remaining } : {}),
+					...(waitId ? { waitId } : {}),
+				},
+				remaining === undefined ? WORKER_REQUEST_TIMEOUT_MS : remaining + 1000,
+				{ signal: controller.signal },
+			);
+			const cancel = () => {
+				if (!waitId) return;
+				void workerClient
+					.requestWorker({ type: "worker_cancel_completion_wait", waitId }, 5000)
+					.catch((error: unknown) => {
+						this.log(`Completion wait cleanup ${waitId} failed: ${String(error)}`);
+					});
+			};
+			controller.signal.addEventListener("abort", cancel, { once: true });
+			if (controller.signal.aborted) cancel();
+			try {
+				const response = await observeCompletion(request, controller.signal);
+				if (!response.success && response.errorInfo?.code === "completion_wait_timeout") {
+					return {
+						...response,
+						id: command.id,
+						errorInfo: { ...response.errorInfo, elapsedMs: performance.now() - startedAt },
+					};
+				}
+				return responseWithId(response, command.id);
+			} catch (error) {
+				if (
+					remaining !== undefined &&
+					(error instanceof DaemonWorkerProbeTimeoutError || error instanceof CompletionWaitTimeoutError)
+				) {
+					cancel();
+					throw new CompletionWaitTimeoutError({
+						complete: false,
+						elapsedMs: performance.now() - startedAt,
+						blockers: [{ kind: "worker_response", id: command.activeSessionId }],
+					});
+				}
+				throw error;
+			} finally {
+				controller.signal.removeEventListener("abort", cancel);
+			}
+		} finally {
+			client.socket.off("close", closed);
+		}
 	}
 
 	private async forwardToWorker(

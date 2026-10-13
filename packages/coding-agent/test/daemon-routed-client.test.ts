@@ -162,7 +162,7 @@ describe("DaemonWorkerClient direct decoding", () => {
 					expect.objectContaining({
 						message:
 							termination === "timeout"
-								? "Timed out waiting for daemon worker response to get_state"
+								? "Timed out waiting for daemon worker response to get_state. Request ID: worker_1; elapsedMs: 50. Socket: /tmp/prime-agent-direct.sock."
 								: "Daemon worker client closed",
 					}),
 				);

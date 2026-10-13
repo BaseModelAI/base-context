@@ -325,3 +325,65 @@ it("keeps ownership until other started calls settle after an admission failure"
 		true,
 	);
 });
+
+it.each(["sequential", "parallel"] as const)(
+	"joins every accepted %s tool update after an observer failure",
+	async (toolExecution) => {
+		let releaseUpdate!: () => void;
+		const pendingUpdate = new Promise<void>((resolve) => {
+			releaseUpdate = resolve;
+		});
+		let notifyUpdates!: () => void;
+		const updatesStarted = new Promise<void>((resolve) => {
+			notifyUpdates = resolve;
+		});
+		let updates = 0;
+		const finalized: FinalizedToolExchange[] = [];
+		const agent = new Agent({
+			initialState: {
+				model,
+				tools: [
+					{
+						name: "effect",
+						label: "Effect",
+						description: "Fixture",
+						parameters: Type.Object({}),
+						async execute(_id, _args, _signal, onUpdate) {
+							const progress = { content: [{ type: "text" as const, text: "progress" }], details: {} };
+							onUpdate?.(progress);
+							onUpdate?.(progress);
+							return { content: [{ type: "text", text: "actual result" }], details: {} };
+						},
+					},
+				],
+			},
+			streamFn: streamResponse(response([{ type: "toolCall", id: "effect", name: "effect", arguments: {} }])),
+			toolExecution,
+			shouldStopAfterTurn: () => true,
+			onToolExchangeFinalized: (exchange) => {
+				finalized.push(exchange);
+			},
+		});
+		agent.subscribe((event) => {
+			if (event.type !== "tool_execution_update") return;
+			if (++updates === 1) return Promise.reject(new Error("progress observer failed"));
+			notifyUpdates();
+			return pendingUpdate;
+		});
+		const run = agent.prompt("Run effect");
+		await updatesStarted;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		try {
+			expect(agent.state.isStreaming).toBe(true);
+			expect(finalized).toEqual([]);
+		} finally {
+			releaseUpdate();
+			await run;
+		}
+		expect(finalized).toHaveLength(1);
+		expect(finalized[0]).toMatchObject({
+			executionOutcome: "completed",
+			result: { isError: true, content: [{ type: "text", text: "progress observer failed" }] },
+		});
+	},
+);

@@ -68,6 +68,8 @@ export interface KernelManagerOptions {
 	snapshot?: KernelSnapshotConfig;
 	/** Runtime bootstrap re-run on a protocol-repaired kernel so live handles (rlm, bash, skills) exist again. */
 	bootstrapCode?: string;
+	/** Provisioner releases snapshot writes after its initial restore and bootstrap complete. */
+	deferInitialSnapshot?: boolean;
 	/** File receiving the kernel process's stderr, rotated once at each spawn. */
 	stderrLogPath?: string;
 }
@@ -360,7 +362,7 @@ export interface KernelClient {
 	disposeSync(): void;
 	snapshotState(): Promise<SnapshotResult | null>;
 	pruneOversizedVariables(): Promise<SnapshotResult | null>;
-	restoreState(): Promise<RestoreResult | null>;
+	restoreState(options?: { signal?: AbortSignal }): Promise<RestoreResult | null>;
 	listNamespaceNames(signal?: AbortSignal): Promise<string[] | null>;
 }
 

@@ -463,6 +463,10 @@ export function activeActivityForSession(activeSession: ActiveSessionState): Ses
 	if (activeSession.runtime.session.messages.length === 0) {
 		return "idle";
 	}
+	// Opt-in recap policies do not make an optional classifier part of the activity axis.
+	if ((activeSession.runtime.session.settingsManager?.getStatusSummaries() ?? "always") !== "always") {
+		return "idle";
+	}
 	// Hold at "working" until the idle verdict is current, so the view never
 	// buckets an unlabeled idle session.
 	return isSummaryCurrent(activeSession) ? "idle" : "working";

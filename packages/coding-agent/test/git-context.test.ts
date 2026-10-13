@@ -1,9 +1,12 @@
-import { execFileSync } from "node:child_process";
+import * as childProcess from "node:child_process";
+import { ChildProcess, execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { captureGitContext, gitContextsEqual } from "../src/utils/git.js";
+
+vi.mock("node:child_process", async (importOriginal) => ({ ...(await importOriginal<typeof childProcess>()) }));
 
 function git(cwd: string, ...args: string[]): string {
 	return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -30,50 +33,73 @@ describe("captureGitContext", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("reads branch, commit, and normalized repo url", () => {
+	it("starts all Git probes before any completes", async () => {
+		const callbacks: NonNullable<Parameters<typeof childProcess.execFile>[3]>[] = [];
+		const probe = vi.spyOn(childProcess, "execFile").mockImplementation((_file, _args, _options, callback) => {
+			callbacks.push(callback!);
+			return new ChildProcess();
+		});
+		const capture = captureGitContext(dir);
+		expect(probe.mock.calls.map(([file, args, options]) => [file, args, options])).toEqual([
+			["git", ["--no-optional-locks", "rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }],
+			["git", ["--no-optional-locks", "branch", "--show-current"], { cwd: dir, encoding: "utf8" }],
+			["git", ["--no-optional-locks", "remote", "get-url", "origin"], { cwd: dir, encoding: "utf8" }],
+		]);
+		callbacks[2](null, "https://github.com/acme/widgets.git\n", "");
+		callbacks[0](null, "commit-sha\n", "");
+		callbacks[1](null, "main\n", "");
+		expect(await capture).toEqual({
+			commit: "commit-sha",
+			branch: "main",
+			repoUrl: "https://github.com/acme/widgets.git",
+		});
+	});
+
+	it("reads branch, commit, and normalized repo url", async () => {
 		initRepo(dir);
 		git(dir, "remote", "add", "origin", "https://github.com/acme/widgets.git");
 		const sha = commit(dir, "init");
 
-		expect(captureGitContext(dir)).toEqual({
+		expect(await captureGitContext(dir)).toEqual({
 			branch: "main",
 			commit: sha,
 			repoUrl: "https://github.com/acme/widgets.git",
 		});
 	});
 
-	it("reports a detached HEAD as a commit with no branch", () => {
+	it("reports a detached HEAD as a commit with no branch", async () => {
 		initRepo(dir);
 		const sha = commit(dir, "init");
 		git(dir, "checkout", "-q", sha);
 
-		const ctx = captureGitContext(dir);
+		const ctx = await captureGitContext(dir);
 		expect(ctx?.commit).toBe(sha);
 		expect(ctx?.branch).toBeUndefined();
 	});
 
-	it("omits repo url when there is no origin remote", () => {
+	it("omits repo url when there is no origin remote", async () => {
 		initRepo(dir);
 		const sha = commit(dir, "init");
 
-		const ctx = captureGitContext(dir);
+		const ctx = await captureGitContext(dir);
 		expect(ctx?.repoUrl).toBeUndefined();
 		expect(ctx?.commit).toBe(sha);
 	});
 
-	it("keeps an ssh remote url verbatim when it cannot be normalized", () => {
+	it("keeps an ssh remote url verbatim when it cannot be normalized", async () => {
 		initRepo(dir);
 		git(dir, "remote", "add", "origin", "git@github.com:acme/widgets.git");
 		commit(dir, "init");
 
-		expect(captureGitContext(dir)?.repoUrl).toBe("git@github.com:acme/widgets.git");
+		expect((await captureGitContext(dir))?.repoUrl).toBe("git@github.com:acme/widgets.git");
 	});
 
-	it("returns null outside a git repo", () => {
-		expect(captureGitContext(dir)).toBeNull();
+	it("returns null outside a git repo", async () => {
+		expect(await captureGitContext(dir)).toBeNull();
 	});
 });
 

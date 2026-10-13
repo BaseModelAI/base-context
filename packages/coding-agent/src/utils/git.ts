@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import hostedGitInfo from "hosted-git-info";
@@ -248,20 +248,20 @@ export function gitContextsEqual(a: GitContext, b: GitContext): boolean {
 	return a.repoUrl === b.repoUrl && a.commit === b.commit && a.branch === b.branch;
 }
 
-function runGit(cwd: string, args: string[]): string | null {
-	const result = spawnSync("git", ["--no-optional-locks", ...args], {
-		cwd,
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "ignore"],
+function runGit(cwd: string, args: string[]): Promise<string | null> {
+	return new Promise((resolve) => {
+		execFile("git", ["--no-optional-locks", ...args], { cwd, encoding: "utf8" }, (error, stdout) => {
+			resolve(error ? null : stdout.trim() || null);
+		});
 	});
-	if (result.status !== 0 || typeof result.stdout !== "string") return null;
-	return result.stdout.trim() || null;
 }
 
-export function captureGitContext(cwd: string): GitContext | null {
-	const commit = runGit(cwd, ["rev-parse", "HEAD"]);
-	const branch = runGit(cwd, ["branch", "--show-current"]);
-	const remote = runGit(cwd, ["remote", "get-url", "origin"]);
+export async function captureGitContext(cwd: string): Promise<GitContext | null> {
+	const [commit, branch, remote] = await Promise.all([
+		runGit(cwd, ["rev-parse", "HEAD"]),
+		runGit(cwd, ["branch", "--show-current"]),
+		runGit(cwd, ["remote", "get-url", "origin"]),
+	]);
 	if (!commit && !branch && !remote) return null;
 
 	const context: GitContext = {};

@@ -24,7 +24,7 @@ import {
 	type OrphanProcessJournalOwner,
 	reapKernelOrphanProcesses,
 } from "../orphan-process-journal.js";
-import { ToolOutputCapture } from "../retained-tool-output.js";
+import { getToolOutputPreviewBytes, ToolOutputCapture } from "../retained-tool-output.js";
 import {
 	createNativeRecoveryRefusal,
 	DEFAULT_NATIVE_RECOVERY_LIMITS,
@@ -33,6 +33,7 @@ import {
 	stringifyNativeRecoveryResponse,
 } from "../selective-recovery.js";
 import { ensureKernelPython } from "./bootstrap.js";
+import { ReplProtocolLineParser, ReplProtocolLineTooLongError } from "./repl-protocol-lines.js";
 import {
 	AGENT_MESSAGE_DISPLAY_MIME,
 	ATTACHMENT_DISPLAY_MIME,
@@ -117,6 +118,7 @@ interface ActiveExecution {
 	stderrTruncated: boolean;
 	resultTruncated: boolean;
 	errorTruncated: boolean;
+	upstreamTruncated: boolean;
 	outputCapture?: ToolOutputCapture;
 	initialBackgroundTruncated: boolean;
 	result?: string;
@@ -201,6 +203,10 @@ export class ReplKernelManager {
 	>;
 	private readonly handledHostRequestIds = new Set<string>();
 	private child?: ChildProcess;
+	private childExit?: Promise<void>;
+	private cleanupFailure?: Error;
+	private initialSnapshotPending: boolean;
+	private restoreIncomplete = false;
 	private childOrphanOwner?: OrphanProcessJournalOwner;
 	private readyDeferred?: ReturnType<typeof createDeferred<number>>;
 	private pythonVersion?: string;
@@ -289,6 +295,7 @@ export class ReplKernelManager {
 	private teardownInFlight = 0;
 
 	constructor(options: KernelManagerOptions) {
+		this.initialSnapshotPending = options.deferInitialSnapshot ?? false;
 		this.options = {
 			python: options.python,
 			cwd: options.cwd,
@@ -300,6 +307,11 @@ export class ReplKernelManager {
 			bootstrapCode: options.bootstrapCode,
 			stderrLogPath: options.stderrLogPath,
 		};
+	}
+
+	markSnapshotReady(): void {
+		if (!this.isRunning) throw new Error("Kernel stopped before startup completed");
+		this.initialSnapshotPending = false;
 	}
 
 	get ownerSessionId(): string | undefined {
@@ -353,9 +365,12 @@ export class ReplKernelManager {
 	}
 
 	async start(options: KernelStartOptions = {}): Promise<void> {
+		if (this.cleanupFailure) throw this.cleanupFailure;
 		if (options.signal?.aborted) {
 			throw createKernelStartupAbortError();
 		}
+		// Resource removal is not process exit: a replacement joins the retired child.
+		if (!this.child && this.childExit) await raceStartupWithAbort(this.childExit, options.signal);
 		if (!this.startPromise) {
 			const startPromise = this.doStart({ onBootstrapProgress: options.onBootstrapProgress }).catch((error) => {
 				// Only clear our own memoization: a stale start must not evict a newer one.
@@ -490,34 +505,46 @@ export class ReplKernelManager {
 	}
 
 	private wireChild(child: ChildProcess): void {
+		this.childExit = new Promise<void>((resolve) => {
+			child.once("exit", () => resolve());
+			child.once("error", () => {
+				if (child.pid === undefined) resolve();
+			});
+		});
 		const decoder = new StringDecoder("utf8");
-		let buffered = "";
+		const lines = new ReplProtocolLineParser();
+		let poisoned = false;
+		const fail = (diagnostic: string) => {
+			poisoned = true;
+			this.failProtocolFrame(child, diagnostic);
+		};
 		child.stdout?.on("data", (buf: Buffer) => {
-			if (this.child !== child) return;
-			buffered += decoder.write(buf);
-			let newline = buffered.indexOf("\n");
-			while (newline !== -1) {
-				const line = buffered.slice(0, newline);
-				buffered = buffered.slice(newline + 1);
-				newline = buffered.indexOf("\n");
-				if (!line.trim()) continue;
-				let event: unknown;
-				try {
-					event = JSON.parse(line);
-				} catch {
-					this.failProtocolFrame(child, `unparseable protocol line: ${line.slice(0, 200)}`);
-					return;
-				}
-				if (!isRecord(event)) {
-					this.failProtocolFrame(child, `non-object protocol line: ${line.slice(0, 200)}`);
-					return;
-				}
-				const invalidReason = invalidProtocolFrameReason(event);
-				if (invalidReason) {
-					this.failProtocolFrame(child, `${invalidReason}: ${line.slice(0, 200)}`);
-					return;
-				}
-				this.handleEvent(event);
+			if (this.child !== child || poisoned) return;
+			try {
+				lines.push(decoder.write(buf), (line) => {
+					if (!line.trim()) return true;
+					let event: unknown;
+					try {
+						event = JSON.parse(line);
+					} catch {
+						fail(`unparseable protocol line: ${line.slice(0, 200)}`);
+						return false;
+					}
+					if (!isRecord(event)) {
+						fail(`non-object protocol line: ${line.slice(0, 200)}`);
+						return false;
+					}
+					const invalidReason = invalidProtocolFrameReason(event);
+					if (invalidReason) {
+						fail(`${invalidReason}: ${line.slice(0, 200)}`);
+						return false;
+					}
+					this.handleEvent(event);
+					return this.child === child;
+				});
+			} catch (error) {
+				if (!(error instanceof ReplProtocolLineTooLongError)) throw error;
+				fail(error.message);
 			}
 		});
 
@@ -629,8 +656,11 @@ export class ReplKernelManager {
 			// successful restore never implicates the snapshot; keeping the flag
 			// costs at most one bounded restore per later attempt.
 			const snapshotSuspect = this.pendingRestore;
-			this.killChildToIdle();
-			if (snapshotSuspect) this.pendingRestore = false;
+			if (snapshotSuspect) {
+				void this.kill().catch((failure) => this.appendKernelDiagnostic(errorMessage(failure)));
+			} else {
+				this.killChildToIdle();
+			}
 			return;
 		}
 		const owner = { superseded: false };
@@ -654,15 +684,15 @@ export class ReplKernelManager {
 		if (this.child !== child || this.state === "shutdown") return;
 		this.killChildToIdle();
 
-		const start = this.start();
-		const generation = this.startGeneration;
 		try {
-			await start;
+			await this.start();
 		} catch (error) {
 			this.finishFailedProtocolRepair(owner, error);
 			return;
 		}
-		if (this.startStale(generation) || (this.state as string) !== "running") {
+		if (owner.superseded || this.protocolRepairOwner !== owner) return;
+		const generation = this.startGeneration;
+		if ((this.state as string) !== "running") {
 			this.finishFailedProtocolRepair(owner);
 			return;
 		}
@@ -675,9 +705,7 @@ export class ReplKernelManager {
 		if (this.options.snapshot && restored === null) {
 			if (owner.superseded || this.protocolRepairOwner !== owner) return;
 			this.appendKernelDiagnostic("protocol repair restore failed; discarding replacement kernel");
-			this.killChildToIdle();
-			// The snapshot is the declared culprit; the lazy path must not retry it.
-			this.pendingRestore = false;
+			await this.kill();
 			return;
 		}
 
@@ -745,9 +773,10 @@ export class ReplKernelManager {
 			const started = this.reprovisionFreshKernel(code);
 			task = started;
 			this.rebootstrapPromise = started;
-			void started.finally(() => {
+			const clearRebootstrap = () => {
 				if (this.rebootstrapPromise === started) this.rebootstrapPromise = undefined;
-			});
+			};
+			void started.then(clearRebootstrap, clearRebootstrap);
 		}
 		// An aborted request never executes, so it may skip the wait; race the
 		// signal like waitForProtocolRepair does instead of riding out the
@@ -773,12 +802,12 @@ export class ReplKernelManager {
 	/** Restore (one-shot, best-effort) then bootstrap the lazily started fresh kernel. */
 	private async reprovisionFreshKernel(code: string | undefined): Promise<boolean> {
 		if (this.options.snapshot && this.pendingRestore) {
-			await this.performRestore(true); // clears pendingRestore on success
-			// Corrupted during the restore: the spawned repair owns the kernel now.
+			const restored = await this.performRestore(true);
 			if (this.protocolRepairPromise || this.state !== "running") return false;
-			// One attempt per discard: a clean restore failure falls back to an
-			// empty namespace (ordinary startup semantics), never a retry loop.
-			this.pendingRestore = false;
+			if (!restored) {
+				await this.kill();
+				return false;
+			}
 		}
 		if (!code || !this.pendingRebootstrap) return true;
 		const ok = await this.bootstrapRepairedKernel(code);
@@ -790,7 +819,7 @@ export class ReplKernelManager {
 	private killChildToIdle(): void {
 		// The discarded kernel carried the runtime bootstrap and (possibly) the
 		// restored namespace; a lazily started replacement must reprovision both.
-		this.pendingRebootstrap = true;
+		this.pendingRebootstrap = Boolean(this.options.bootstrapCode);
 		this.pendingRestore = true;
 		this.state = "shutdown";
 		liveKernels.delete(this);
@@ -948,10 +977,11 @@ export class ReplKernelManager {
 			}
 			execution.opts.onStream?.(text, type);
 		} else if (type === "result") {
+			execution.upstreamTruncated ||= event.upstreamTruncated === true;
 			if (typeof event.text === "string") {
 				execution.outputCapture?.append("result", event.text);
 				execution.result = event.text.slice(0, execution.maxChars);
-				execution.resultTruncated = event.text.length > execution.maxChars;
+				execution.resultTruncated = event.upstreamTruncated === true || event.text.length > execution.maxChars;
 			}
 		} else if (type === "display") {
 			const data = isRecord(event.data) ? event.data : {};
@@ -969,11 +999,14 @@ export class ReplKernelManager {
 			const sentAgentMessage = parseSentAgentMessage(data[AGENT_MESSAGE_DISPLAY_MIME]);
 			if (sentAgentMessage) execution.sentAgentMessages.push(sentAgentMessage);
 		} else if (type === "error") {
+			execution.upstreamTruncated ||= event.upstreamTruncated === true;
 			const ename = typeof event.ename === "string" ? event.ename : "Error";
 			const evalue = typeof event.evalue === "string" ? event.evalue : "";
 			const traceback = asStringArray(event.traceback).join("\n");
 			execution.outputCapture?.append("error", traceback || `${ename}: ${evalue}`);
-			execution.errorTruncated = Math.max(ename.length, evalue.length, traceback.length) > execution.maxChars;
+			execution.errorTruncated =
+				event.upstreamTruncated === true ||
+				Math.max(ename.length, evalue.length, traceback.length) > execution.maxChars;
 			execution.error = {
 				ename: ename.slice(0, execution.maxChars),
 				evalue: evalue.slice(0, execution.maxChars),
@@ -1004,7 +1037,7 @@ export class ReplKernelManager {
 		const result = await this.enqueueExecute(code, opts);
 		// Refresh the on-disk snapshot after real work so a later resume (or a
 		// crash before graceful shutdown) revives the most recent namespace.
-		if (result.status === "ok") {
+		if (result.status === "ok" && !opts.internal) {
 			this.scheduleSnapshot();
 		}
 		return result;
@@ -1117,6 +1150,7 @@ export class ReplKernelManager {
 			stderrTruncated: false,
 			resultTruncated: false,
 			errorTruncated: false,
+			upstreamTruncated: false,
 			outputCapture:
 				opts.outputDirectory && !opts.internal ? new ToolOutputCapture(opts.outputDirectory) : undefined,
 			initialBackgroundTruncated: this.pendingBackgroundOutputTruncated,
@@ -1173,6 +1207,7 @@ export class ReplKernelManager {
 			if (!opts.internal) {
 				this.lastCellCode = code;
 			}
+			let writeAttempted = false;
 			try {
 				opts.onExecutionStarted?.({
 					id: requestId,
@@ -1184,6 +1219,7 @@ export class ReplKernelManager {
 					}),
 					interrupt: () => (this.activeExecution === execution ? this.interrupt() : Promise.resolve()),
 				});
+				writeAttempted = true;
 				const sendPromise = this.writeLine({ ...requestFields, id: requestId });
 				sendPromise.catch(() => undefined);
 				await Promise.race([sendPromise, result.promise.then(() => undefined)]);
@@ -1192,7 +1228,12 @@ export class ReplKernelManager {
 				}
 			} catch (error) {
 				const failure = error instanceof Error ? error : new Error(String(error));
-				if (this.activeExecution === execution) this.rejectActiveExecution(failure);
+				if (this.activeExecution === execution) {
+					this.rejectActiveExecution(failure, writeAttempted);
+					// A failed write can leave a live interpreter with no usable request channel.
+					// Retire it so physical settlement does not depend on another caller killing it.
+					if (writeAttempted) this.killChildToIdle();
+				}
 				return await result.promise;
 			}
 			return await result.promise;
@@ -1260,8 +1301,15 @@ export class ReplKernelManager {
 
 	private executionResult(execution: ActiveExecution): InternalExecuteResult {
 		const status = execution.opts.signal?.aborted ? "aborted" : execution.status;
-		const complete = status !== "aborted" && Boolean(execution.doneFields) && !execution.initialBackgroundTruncated;
-		const retainedOutput = execution.outputCapture?.finish(complete);
+		const complete =
+			status !== "aborted" &&
+			Boolean(execution.doneFields) &&
+			!execution.initialBackgroundTruncated &&
+			!execution.upstreamTruncated;
+		const retainedOutput = execution.outputCapture?.finish(
+			complete,
+			getToolOutputPreviewBytes({ status, stderr: execution.stderr, error: execution.error }),
+		);
 		const preview = (text: string, truncated: boolean, background = false) => {
 			const marker = retainedOutput
 				? "preview omitted; read retained output"
@@ -1326,7 +1374,7 @@ export class ReplKernelManager {
 		}
 	}
 
-	private rejectActiveExecution(error: Error): void {
+	private rejectActiveExecution(error: Error, waitForExit = true): void {
 		const execution = this.activeExecution;
 		if (!execution) {
 			return;
@@ -1343,7 +1391,10 @@ export class ReplKernelManager {
 			execution.reject(error);
 		}
 		execution.settled = true;
-		execution.physicalSettlement.resolve();
+		// A rejected request is not a done event. Keep its physical owner until the
+		// original interpreter exits, even after cleanup detaches this.child.
+		const childExit = waitForExit ? this.childExit : undefined;
+		void (childExit ?? Promise.resolve()).then(() => execution.physicalSettlement.resolve());
 		this.notifyActiveExecutionIdle();
 	}
 
@@ -1585,9 +1636,9 @@ export class ReplKernelManager {
 				`Kernel cleanup tracking is unknown: ${failures.map(errorMessage).join("; ")}`,
 			);
 			this.appendKernelDiagnostic(failure.message);
-			return failure;
+			this.cleanupFailure = failure;
 		}
-		return undefined;
+		return this.cleanupFailure;
 	}
 
 	private async waitForKernelExit(): Promise<void> {
@@ -1627,7 +1678,13 @@ export class ReplKernelManager {
 
 		this.teardownInFlight++;
 		this.supersedeProtocolRepair();
-		const operation = this.performShutdown(opts);
+		// A superseding kill owns cleanup, but all shutdown callers still join physical exit.
+		const childExit = this.childExit;
+		const operation = this.performShutdown(opts).then(async (performedCleanup) => {
+			if (this.cleanupFailure) throw this.cleanupFailure;
+			await childExit;
+			return performedCleanup;
+		});
 		this.gracefulShutdownPromise = operation;
 		try {
 			return await operation;
@@ -1641,7 +1698,7 @@ export class ReplKernelManager {
 		if (this.state === "shutdown") {
 			liveKernels.delete(this);
 			if (this.gracefulShutdownGeneration === this.startGeneration) return false;
-			const failure = this.cleanupResources();
+			const failure = this.cleanupResources("SIGKILL");
 			if (failure) throw failure;
 			return true;
 		}
@@ -1705,7 +1762,7 @@ export class ReplKernelManager {
 			if (doneWaiterId) this.pendingDoneWaiters.delete(doneWaiterId);
 			if (this.gracefulShutdownGeneration === generation) this.gracefulShutdownGeneration = undefined;
 			if (!this.startStale(generation)) {
-				cleanupFailure = this.cleanupResources();
+				cleanupFailure = this.cleanupResources("SIGKILL");
 				performedCleanup = true;
 			}
 		}
@@ -1746,7 +1803,9 @@ export class ReplKernelManager {
 		this.supersedeProtocolRepair();
 		this.state = "shutdown";
 		liveKernels.delete(this);
-		this.cleanupResources("SIGKILL");
+		const failure = this.cleanupResources("SIGKILL");
+		if (failure) throw failure;
+		await this.childExit;
 	}
 
 	/**
@@ -1766,7 +1825,15 @@ export class ReplKernelManager {
 		options: { executionTimeoutMs?: number; pruneOversized?: boolean } = {},
 	): Promise<SnapshotResult | null> {
 		const cfg = this.options.snapshot;
-		if (!cfg || !this.isRunning) return null;
+		if (
+			!cfg ||
+			!this.isRunning ||
+			this.initialSnapshotPending ||
+			this.restoreIncomplete ||
+			this.pendingRestore ||
+			this.pendingRebootstrap
+		)
+			return null;
 		try {
 			const r = await this.enqueueRequest(
 				{
@@ -1806,19 +1873,20 @@ export class ReplKernelManager {
 	 * start() and before the runtime bootstrap, which then refreshes live handles
 	 * (rlm, skills) over anything restored. Never throws.
 	 */
-	async restoreState(): Promise<RestoreResult | null> {
-		return this.performRestore(false);
+	async restoreState(options: { signal?: AbortSignal } = {}): Promise<RestoreResult | null> {
+		return this.performRestore(false, options.signal);
 	}
 
 	/** Repair restores bypass the repair gate and are bounded so a stalled kernel cannot wedge it. */
-	private async performRestore(protocolRepair: boolean): Promise<RestoreResult | null> {
+	private async performRestore(protocolRepair: boolean, signal?: AbortSignal): Promise<RestoreResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg) return null;
+		this.restoreIncomplete = true;
 		try {
 			const r = await this.enqueueRequest(
 				{ type: "restore", path: cfg.path },
 				"",
-				{ internal: true, protocolRepair },
+				{ internal: true, protocolRepair, signal },
 				protocolRepair ? REPAIR_STEP_TIMEOUT_MS : undefined,
 			);
 			if (r.status !== "ok" || !r.doneFields) {
@@ -1828,6 +1896,7 @@ export class ReplKernelManager {
 				return null;
 			}
 			this.pendingRestore = false;
+			this.restoreIncomplete = false;
 			return {
 				restored: asStringArray(r.doneFields.restored),
 				failed: asReasonArray(r.doneFields.failed),
@@ -1889,7 +1958,8 @@ export class ReplKernelManager {
 		if (!this.options.snapshot || !this.isRunning) return;
 		// A kernel that never restored the saved namespace must not overwrite it:
 		// the on-disk snapshot is strictly fresher than this namespace.
-		if (this.pendingRestore) return;
+		if (this.initialSnapshotPending || this.restoreIncomplete || this.pendingRestore || this.pendingRebootstrap)
+			return;
 		// Block new external executions so none can splice ahead of the final snapshot and stall dispose.
 		this.flushingSnapshotForDispose = true;
 		try {

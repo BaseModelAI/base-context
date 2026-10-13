@@ -52,7 +52,13 @@ Each `bash()` call is its own process, while Python state, `os.chdir(...)`, and 
 
 #### Pending cell control
 
-Fast `ipython` cells return their normal result. If an admitted cell has not finished after one second, the tool returns a pending execution ID without cancelling it. The cell is **not paused**: it keeps running in the same namespace and can change variables and files.
+Fast `ipython` cells return their normal result. If an admitted cell has not finished after the configured foreground wait (one second by default), the tool returns a pending execution ID without cancelling it. The cell is **not paused**: it keeps running in the same namespace and can change variables and files.
+
+Set `foregroundWaitMs` in global or project `settings.json` to a finite nonnegative duration in milliseconds (default `1000`). `0` yields as soon as the host can return a pending result. This changes only foreground waiting after admission, not startup or execution deadlines. The generated prompt uses the same effective value. `bash()` still returns its background handle immediately.
+
+Initial snapshot restore and runtime bootstrap each have a 30-second deadline. Startup failure waits for kernel cleanup and does not overwrite the previous usable snapshot. Kernel replacement waits for the previous kernel to stop. Failed cleanup blocks replacement. Snapshot writes stay disabled until initial restore and bootstrap succeed, and while a replacement kernel still needs restore or bootstrap. A structural restore failure during protocol repair stops that kernel and preserves the saved snapshot; it does not continue with an empty namespace. Per-variable restore failures still permit the other variables to load.
+
+Persistent sessions retain large final output and show a bounded text preview: 4 KiB for successful output without stderr or an error, and 8 KiB for diagnostics. The preview budget uses UTF-8 bytes and includes its retention notice. Full captured text remains recoverable; partial capture is marked. Native selected recovery bodies, attachments, and execution ownership are separate from this preview.
 
 Use these `ipython` tool arguments, not Python code:
 
@@ -63,7 +69,7 @@ Use these `ipython` tool arguments, not Python code:
 
 Status and interrupt are handled by the host, so they do not wait for the busy Python cell. Use either `code` or an `action` with `execution_id`, never both. One cell can be outstanding. New code is rejected while it runs. After it finishes, a completion follow-up gives its ID; new code remains rejected with a result-ready notice until `status` collects the final rich result and frees the slot. End the turn when waiting for the completion follow-up. This is not a registry of completed jobs.
 
-Interruption requests cancellation and unwinding. It is not a resumable pause or rollback, and it does not guarantee cleanup of arbitrary subprocess groups. The request can return before execution has stopped; collect the terminal result with `status`. Pending execution remains part of session completion and end-of-input handling. Yielding does not change the task deadline or restart the kernel.
+Interruption requests cancellation and unwinding. It is not a resumable pause or rollback, and it does not guarantee cleanup of arbitrary subprocess groups. Aborting a foreground call returns control promptly even with a long configured wait. The request can return before execution has stopped; collect the terminal result with `status`. Pending execution remains part of session completion and end-of-input handling. Yielding does not change the task deadline or restart the kernel.
 
 ### 2. Subagents are native RLM calls
 

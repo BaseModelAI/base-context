@@ -1,5 +1,5 @@
 import { PassThrough } from "node:stream";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	encodePrivateFrame,
 	PrivateFrameDecoder,
@@ -40,6 +40,36 @@ describe("private worker framing", () => {
 			{ header: { type: "event", requestId: "one" }, payload: Buffer.from([0, 1, 2, 255]) },
 			{ header: { type: "response", requestId: "two" }, payload: Buffer.from("payload") },
 		]);
+	});
+
+	it("copies fragmented frames linearly and owns the returned payload", () => {
+		const frame = encodePrivateFrame({ type: "snapshot" }, Buffer.alloc(4096, 7));
+		const decoder = new PrivateFrameDecoder(isTestHeader);
+		const concat = vi.spyOn(Buffer, "concat");
+		const copy = vi.spyOn(Buffer.prototype, "copy");
+		const frames = [];
+		let copiedBytes = frame.length;
+		try {
+			for (let offset = 0; offset < frame.length; offset += 17) {
+				frames.push(...decoder.push(frame.subarray(offset, offset + 17)));
+			}
+			copiedBytes += concat.mock.calls.reduce(
+				(total, [chunks]) => total + chunks.reduce((bytes, chunk) => bytes + chunk.length, 0),
+				0,
+			);
+			copiedBytes += copy.mock.results.reduce(
+				(total, result) => total + (result.type === "return" ? result.value : 0),
+				0,
+			);
+		} finally {
+			concat.mockRestore();
+			copy.mockRestore();
+		}
+		expect(copiedBytes).toBeLessThanOrEqual(frame.length * 2);
+		expect(decoder.bufferedBytes).toBe(0);
+		decoder.finish();
+		frame.fill(0);
+		expect(frames).toEqual([{ header: { type: "snapshot" }, payload: Buffer.alloc(4096, 7) }]);
 	});
 
 	it("rejects invalid lengths, JSON, and routing headers", () => {
