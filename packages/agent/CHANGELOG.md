@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.8] - 2026-10-13
+
+- Fixed tool completion returning before accepted progress updates settled after a listener failure, while preserving the actual execution outcome.
+- Fixed incomplete proxy streams hanging instead of reporting a terminal error.
+
 ## [1.1.0] - 2026-10-04
 
 - Fixed tools that return an error result being reported as successful.
