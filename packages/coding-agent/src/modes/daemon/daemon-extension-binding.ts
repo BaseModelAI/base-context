@@ -252,5 +252,9 @@ function hasExtensionUiClientForMethod(state: ActiveSessionState, method: string
 	if (!isDaemonDialogExtensionUiRequest(method)) {
 		return state.clients.size > 0;
 	}
-	return [...state.clients].some((client) => client.supportsExtensionUi);
+	return [...state.clients].some(
+		(client) =>
+			client.capabilitiesByActiveSessionId?.get(state.activeSessionId)?.has("extension_ui") ??
+			client.supportsExtensionUi,
+	);
 }

@@ -1729,7 +1729,7 @@ export class SessionManager {
 		this.writeState.compactionCount = 0;
 	}
 
-	private async _openNew(): Promise<void> {
+	private async _openNew(selectedLeafId?: string | null): Promise<void> {
 		if (!this.persist || !this.sessionFile) return;
 		const state = this.writeState;
 		const owner = await SessionJournalOwner.open({
@@ -1744,6 +1744,7 @@ export class SessionManager {
 				state.sequence = ack.sequence;
 			}
 			await this._activateIndexedSource(this.fileEntries[0] as SessionHeader);
+			if (selectedLeafId !== undefined && selectedLeafId !== state.leafId) await this.branchTo(selectedLeafId);
 		} catch (error) {
 			state.closed = true;
 			try {
@@ -1837,12 +1838,16 @@ export class SessionManager {
 		return value;
 	}
 
-	private async _refreshOwnedMetadata(state: SessionWriteState, startup = false): Promise<void> {
+	private async _refreshOwnedMetadata(
+		state: SessionWriteState,
+		startup = false,
+		selection?: { leafId: string | null; assertCurrent?: () => void },
+	): Promise<void> {
 		const owner = state.owner!;
 		const snapshot = owner.getSnapshot();
 		const history = await this._acknowledgedHistory(state, snapshot);
 		const bootstrap = await state.history!.currentSourceBootstrap(snapshot);
-		const leafId = startup ? (bootstrap.leaf?.id ?? null) : state.leafId;
+		const leafId = startup ? (bootstrap.leaf?.id ?? null) : selection ? selection.leafId : state.leafId;
 		const index = await state.history!.synchronize(snapshot);
 		const branch = await index.branchBootstrap(state.header!.id, {
 			leafId,
@@ -1855,6 +1860,12 @@ export class SessionManager {
 		)
 			throw new Error("Owned session metadata source byte budget exceeded");
 		const previous = state.metadataRefs ?? {};
+		const metadata = {
+			sessionName: state.sessionName,
+			sessionState: state.sessionState,
+			git: state.git,
+			agentStatus: state.agentStatus,
+		};
 		const read = async (ref: IndexedSourceEvent | null) => {
 			if (!ref) return undefined;
 			const value = await history.hydrateEntry(ref.id, DEFAULT_MANAGER_HISTORY_LIMITS.maxSourceBytes);
@@ -1863,21 +1874,23 @@ export class SessionManager {
 		};
 		if (!state.metadataRefs || previous.name !== bootstrap.sessionInfo?.revision) {
 			const entry = await read(bootstrap.sessionInfo);
-			state.sessionName = entry?.type === "session_info" ? entry.name : undefined;
+			metadata.sessionName = entry?.type === "session_info" ? entry.name : undefined;
 		}
 		if (!state.metadataRefs || previous.state !== bootstrap.sessionState?.revision) {
 			const entry = await read(bootstrap.sessionState);
 			const status = entry?.type === "session_state" ? normalizeSessionStateStatus(entry.state.status) : undefined;
-			state.sessionState = status ? { status } : undefined;
+			metadata.sessionState = status ? { status } : undefined;
 		}
 		if (!state.metadataRefs || previous.git !== branch.gitState?.revision) {
 			const entry = await read(branch.gitState);
-			state.git = entry?.type === "git_state" ? entry.git : state.header?.git;
+			metadata.git = entry?.type === "git_state" ? entry.git : state.header?.git;
 		}
 		if (!state.metadataRefs || previous.status !== branch.agentStatus?.revision) {
 			const entry = await read(branch.agentStatus);
-			state.agentStatus = entry?.type === "agent_status" ? { ...entry.status } : undefined;
+			metadata.agentStatus = entry?.type === "agent_status" ? { ...entry.status } : undefined;
 		}
+		selection?.assertCurrent?.();
+		Object.assign(state, metadata);
 		state.metadataRefs = {
 			name: bootstrap.sessionInfo?.revision,
 			state: bootstrap.sessionState?.revision,
@@ -2107,7 +2120,7 @@ export class SessionManager {
 				),
 			);
 			next._buildIndex();
-			await next._openNew();
+			await next._openNew(captured.leafId);
 			await this._adopt(next);
 			return this.sessionFile!;
 		} finally {
@@ -3223,8 +3236,12 @@ export class SessionManager {
 			},
 			captureSkillSelection: () => ({
 				assertCurrent: assertWriter,
-				append: (capture, producer) => {
-					assertWriter();
+				append: (capture, producer, assertOperationCurrent) => {
+					const assertCurrent = () => {
+						assertWriter();
+						assertOperationCurrent?.();
+					};
+					assertCurrent();
 					if (producer === "command")
 						return this._appendCustomEntry(
 							SELECTED_SKILL_CUSTOM_TYPE,
@@ -3238,7 +3255,7 @@ export class SessionManager {
 							},
 							undefined,
 							"native-recovery",
-							{ maxSourceBytes: DEFAULT_NATIVE_RECOVERY_LIMITS.maxSourceBytes, assertCurrent: assertWriter },
+							{ maxSourceBytes: DEFAULT_NATIVE_RECOVERY_LIMITS.maxSourceBytes, assertCurrent },
 						);
 					return this._appendCustomMessageEntry(
 						SELECTED_SKILL_CUSTOM_TYPE,
@@ -3249,7 +3266,7 @@ export class SessionManager {
 						},
 						undefined,
 						"native-recovery",
-						{ maxSourceBytes: DEFAULT_NATIVE_RECOVERY_LIMITS.maxSourceBytes, assertCurrent: assertWriter },
+						{ maxSourceBytes: DEFAULT_NATIVE_RECOVERY_LIMITS.maxSourceBytes, assertCurrent },
 					);
 				},
 			}),
@@ -4109,14 +4126,8 @@ export class SessionManager {
 			if (id !== null && !(await history.get(id))) throw new Error(`Entry ${id} not found`);
 			assertOperationCurrent?.();
 			const previous = state.leafId;
-			state.leafId = id;
-			try {
-				await this._refreshOwnedMetadata(state);
-				if (id !== previous) state.branchSelectionRevision++;
-			} catch (error) {
-				state.leafId = previous;
-				throw error;
-			}
+			await this._refreshOwnedMetadata(state, false, { leafId: id, assertCurrent: assertOperationCurrent });
+			if (id !== previous) state.branchSelectionRevision++;
 		});
 	}
 

@@ -28,7 +28,7 @@ import { shortHash } from "../utils/hash.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
-import { recordStreamFailure, streamFailureFromStopReason } from "../utils/stream-failure.js";
+import { recordStreamFailure, StreamFailureError, streamFailureFromStopReason } from "../utils/stream-failure.js";
 import { buildBaseOptions } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
@@ -280,6 +280,7 @@ async function consumeChatStream(
 	const blocks = output.content;
 	const blockIndex = () => blocks.length - 1;
 	const toolBlocksByKey = new Map<string, number>();
+	let sawFinishReason = false;
 
 	const finishCurrentBlock = (block?: typeof currentBlock) => {
 		if (!block) return;
@@ -336,6 +337,7 @@ async function consumeChatStream(
 		if (!choice) continue;
 
 		if (choice.finishReason) {
+			sawFinishReason = true;
 			attempts.terminal(choice.finishReason === "error" ? "failed" : "completed");
 			output.stopReason = mapChatStopReason(choice.finishReason);
 			if (output.stopReason === "error") {
@@ -458,6 +460,10 @@ async function consumeChatStream(
 				partial: output,
 			});
 		}
+	}
+
+	if (!sawFinishReason) {
+		throw new StreamFailureError("Response stream ended before finish_reason", { kind: "transport" });
 	}
 
 	finishCurrentBlock(currentBlock);

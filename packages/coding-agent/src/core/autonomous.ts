@@ -169,11 +169,11 @@ export function autonomousStatus(state: AutonomousRuntimeState): AgentAutonomous
 	};
 }
 
-export function addAutonomousUsage(state: AutonomousRuntimeState, usage: Usage | undefined): void {
+export function addAutonomousUsage(state: AutonomousRuntimeState, usage: Usage | undefined, countTurn = true): void {
 	if (!state.enabled) {
 		return;
 	}
-	state.turnsUsed++;
+	if (countTurn) state.turnsUsed++;
 	state.tokensUsed += autonomousTokenDelta(usage);
 }
 

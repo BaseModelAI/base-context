@@ -45,7 +45,7 @@ export interface NativeSkillSourceRef {
 
 export interface CapturedSkillSelectionWriter {
 	assertCurrent(): void;
-	append(capture: SelectedSkillCapture, producer: "model" | "command"): Promise<string>;
+	append(capture: SelectedSkillCapture, producer: "model" | "command", assertCurrent?: () => void): Promise<string>;
 }
 
 export function captureSkillDescriptor(skill: Skill): SelectedSkillDescriptor {

@@ -713,7 +713,7 @@ def _snapshot_state(
                 writer.write(_SNAPSHOT_MAGIC)
                 missing = object()
                 for name in list(ns.keys()):
-                    if name.startswith("_") or name in _ALWAYS_SKIP:
+                    if not isinstance(name, str) or name.startswith("_") or name in _ALWAYS_SKIP:
                         continue
                     value = ns.get(name, missing)
                     if value is missing:

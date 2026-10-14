@@ -548,6 +548,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
 			}
+			if (!rawFinishReason) {
+				throw new StreamFailureError("Response stream ended before finish_reason", { kind: "transport" });
+			}
 
 			if (output.stopReason === "aborted") {
 				throw new Error("Request was aborted");

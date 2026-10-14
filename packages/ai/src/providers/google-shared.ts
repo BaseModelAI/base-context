@@ -15,7 +15,7 @@ import { transformMessages } from "./transform-messages.js";
 
 /** These adapters set no SDK retryOptions: ApiClient.apiCall performs exactly one fetch. */
 export function instrumentGoogleAttempts(client: GoogleGenAI, attempts: ProviderAttemptTracker): void {
-	if (!attempts.enabled) return;
+	// Keep cancellation ownership even when no attempt observer is installed.
 	// GenAI has no public fetch injection. Scope the native API-client hook to this new client,
 	// never global fetch. Enabling SDK retryOptions requires moving this hook below its retry loop.
 	const apiClient = (client as unknown as { apiClient: { apiCall: typeof globalThis.fetch } }).apiClient;

@@ -57,6 +57,7 @@ async function* createFunctionCallEvents(argumentsJson: string): AsyncIterable<R
 			arguments: argumentsJson,
 		},
 	} as ResponseStreamEvent;
+	yield { type: "response.completed", response: { status: "completed" } } as ResponseStreamEvent;
 }
 
 describe("openai responses stream handling", () => {
@@ -147,6 +148,7 @@ describe("openai responses stream handling", () => {
 				sequence_number: 5,
 				item: { ...first, arguments: '{"path":"final.txt"}' },
 			};
+			yield { type: "response.completed", response: { status: "completed" } } as ResponseStreamEvent;
 		}
 
 		await processResponsesStream(events(), output, stream, model);

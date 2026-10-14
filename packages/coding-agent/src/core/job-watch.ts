@@ -130,6 +130,7 @@ export class JobWatchController {
 	private busy = new Set<string>();
 	private queued = new Set<string>();
 	private flushing?: Promise<void>;
+	private flushRequested = false;
 	private tail: Promise<unknown> = Promise.resolve();
 	private stopped = false;
 	private unavailable?: string;
@@ -620,10 +621,18 @@ export class JobWatchController {
 		});
 	}
 	flushPending(): Promise<void> {
+		this.flushRequested = true;
 		if (!this.flushing)
-			this.flushing = this.flushPrepared().finally(() => {
-				this.flushing = undefined;
-			});
+			this.flushing = (async () => {
+				try {
+					do {
+						this.flushRequested = false;
+						await this.flushPrepared();
+					} while (this.flushRequested);
+				} finally {
+					this.flushing = undefined;
+				}
+			})();
 		return this.flushing;
 	}
 	private deliveryText(event: PendingWatchEvent): string {

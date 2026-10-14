@@ -397,7 +397,11 @@ export class SettingsManager {
 		this.globalSettingsLoadError = globalLoadError;
 		this.projectSettingsLoadError = projectLoadError;
 		this.errors = [...initialErrors];
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.settings = this.getEffectiveSettings();
+	}
+
+	private getEffectiveSettings(): Settings {
+		return deepMergeSettings(deepMergeSettings(this.globalSettings, this.projectSettings), this.runtimeOverrides);
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -556,13 +560,13 @@ export class SettingsManager {
 			this.recordError("project", projectLoad.error);
 		}
 
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.settings = this.getEffectiveSettings();
 	}
 
 	/** Apply additional overrides on top of current settings */
 	applyOverrides(overrides: Partial<Settings>): void {
 		this.runtimeOverrides = deepMergeSettings(this.runtimeOverrides, overrides);
-		this.settings = deepMergeSettings(this.settings, overrides);
+		this.settings = this.getEffectiveSettings();
 	}
 
 	/** Mark a global field as modified during this session */
@@ -654,7 +658,7 @@ export class SettingsManager {
 	}
 
 	private save(): void {
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.settings = this.getEffectiveSettings();
 
 		if (this.globalSettingsLoadError) {
 			this.recordError(
@@ -677,7 +681,7 @@ export class SettingsManager {
 
 	private saveProjectSettings(settings: Settings): void {
 		this.projectSettings = structuredClone(settings);
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.settings = this.getEffectiveSettings();
 
 		if (this.projectSettingsLoadError) {
 			this.recordError(

@@ -381,11 +381,14 @@ class HarnessState:
             ) as temporary:
                 temporary_path = Path(temporary.name)
                 temporary.write(image)
+                temporary.flush()
+                saved_mtime = fstat(temporary.fileno()).st_mtime_ns
             os.replace(temporary_path, self.file_path)
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
-        self._loaded_mtime = self._disk_mtime()
+        # Another writer may replace the path before save returns. Only acknowledge our image.
+        self._loaded_mtime = saved_mtime
         return self
 
     def upsert(

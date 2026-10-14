@@ -1,0 +1,34 @@
+- Fixed split-turn compaction losing custom instructions and cancelled request preparation committing a new context.
+- Fixed failed and cancelled requests with reported usage being omitted from goal, autonomous, and child-usage totals.
+- Fixed critical job notifications being stranded during a concurrent notification flush.
+- Fixed session replacement and kernel shutdown races that could leave resources active after disposal.
+- Fixed RPC shutdown and completion waits losing process ownership or surviving a terminated process.
+- Fixed daemon disposal hanging when its cleanup connection was lost.
+- Fixed branch selection publishing partial metadata and memory-session restarts losing the selected branch.
+- Fixed Bash output files being returned before they were ready, truncation being missed, and callback failures stranding waiters.
+- Fixed REPL snapshots failing when the namespace contained non-string keys.
+- Fixed cancelled refinements being applied and concurrent refinements overwriting each other in history.
+- Fixed delayed input handlers admitting stale prompts after cancellation or abort.
+- Fixed long history-recovery reads losing their continuation cursor and exact reads hiding requested public fields.
+- Fixed stale session replacements disposing newer sessions and failed child startup leaking a child during deletion.
+- Fixed child-capacity claims surviving acknowledged release or confirmed-dead worker reclamation.
+- Fixed RPC input-pipe failures crashing the client or leaving requests pending while preserving admitted work.
+- Fixed harness saves incorrectly treating another writer's state as already loaded.
+- Fixed early output-file write errors escaping command output capture.
+- Fixed goal completion racing with pending usage publication.
+- Clarified that goal budgets include reported failed and aborted root responses, but exclude child and auxiliary usage.
+- Fixed delayed session-replacement callbacks running against a newer session.
+- Fixed extension-command output corrupting UTF-8 characters split across pipe chunks.
+- Fixed extension dialogs waiting for UI clients attached only to another daemon session.
+- Fixed stale daemon attachments after clients disconnected during snapshot capture.
+- Fixed concurrent goal creation silently replacing an already accepted goal.
+- Fixed cancelled skill selections being saved while waiting for earlier session writes.
+- Fixed initial daemon attachment hanging after disconnect and losing control-plane recovery during direct setup.
+- Fixed closing a self-observation detaching the primary session subscription.
+- Fixed SDK resumes losing saved model and thinking settings on branches without messages.
+- Fixed temporary SDK settings overrides disappearing after saves or reloads.
+- Fixed recovered side questions being reported as failed despite returning an answer.
+- Fixed internal kernel maintenance losing background output before the next user cell.
+- Fixed detached kernel requests being labeled with a newer or internal cell's source.
+- Fixed read-only session watchers claiming extension dialogs and changing another attachment's UI support.
+- Fixed daemon catalog shutdown completing before its child process exited.

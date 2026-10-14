@@ -477,6 +477,9 @@ export class DaemonCatalogClient {
 				await this.request({ type: "request", id: randomUUID(), command: "shutdown" }).catch(() => undefined);
 				if (child?.connected) child.disconnect();
 				if (this.child === child) this.child = undefined;
+				if (child?.pid && child.exitCode === null && child.signalCode === null) {
+					await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
+				}
 			})
 			.finally(() => {
 				this.stopping = undefined;

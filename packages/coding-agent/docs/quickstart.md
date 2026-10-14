@@ -86,7 +86,7 @@ For work that should keep going across turns, explicitly start a goal:
 /goal Implement the migration in PLAN.md and run the documented checks
 ```
 
-Manage it with `/goal status`, `/goal pause`, `/goal resume`, or `/goal clear`. An optional goal token budget counts successful root-main uncached input and output, not cached input, children, auxiliary calls, or total spend. See [persistent goals](long-running-agents.md#persistent-goals).
+Manage it with `/goal status`, `/goal pause`, `/goal resume`, or `/goal clear`. An optional goal token budget counts reported root-main uncached input and output, including failed or aborted responses. It excludes cached input, children, auxiliary calls, and total spend. See [persistent goals](long-running-agents.md#persistent-goals).
 
 ## What needs extra configuration?
 

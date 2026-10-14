@@ -328,6 +328,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 									? "transport-continuation"
 									: "initial",
 				});
+				if (options?.signal?.aborted) throw new Error("Request was aborted");
 				response = undefined;
 				attempts.sent();
 				try {
@@ -901,6 +902,7 @@ async function connectWebSocket(
 	signal?: AbortSignal,
 	timeoutMs = 30_000,
 ): Promise<WebSocketLike> {
+	if (signal?.aborted) throw new Error("Request was aborted");
 	const WebSocketCtor = getWebSocketConstructor();
 	if (!WebSocketCtor) {
 		throw new Error("WebSocket transport is not available in this runtime");
@@ -1049,6 +1051,14 @@ async function acquireWebSocket(
 	}
 
 	const socket = await connectWebSocket(url, headers, signal, timeoutMs);
+	// Another initial handshake may have populated the cache while this one opened.
+	if (websocketSessionCache.has(sessionId)) {
+		return {
+			socket,
+			reused: false,
+			release: () => closeWebSocketSilently(socket),
+		};
+	}
 	const entry: CachedWebSocketConnection = { socket, url, headers: new Headers(headers), busy: true };
 	websocketSessionCache.set(sessionId, entry);
 	return {

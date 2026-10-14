@@ -295,7 +295,9 @@ describe("existing generation receipt usage", () => {
 		expect(output).toContain("request usage unavailable: 1");
 		expect(output).toContain("shared source (counted once)");
 		expect(output).toContain("unvalidated rates, not an invoice");
-		expect(output).toContain("Goal budget: root successful main uncached input + output only");
+		expect(output).toContain(
+			"Goal budget: root-main reported uncached input + output (including failed/aborted responses)",
+		);
 		expect(output).not.toContain("999,999");
 		expect(stripAnsi(formatContextTree(node(), 100))).toContain("Legacy conversation projection");
 	});

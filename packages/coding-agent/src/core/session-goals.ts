@@ -32,6 +32,7 @@ export class SessionGoals {
 	private _goalStateRevision = 0;
 	private _goalAccountingStartedAt: number | undefined;
 	private _goalAccountedAssistantMessages = new WeakSet<AssistantMessage>();
+	private readonly _goalUsageWrites = new Set<Promise<boolean>>();
 
 	constructor(
 		private readonly _getManager: () => SessionManager,
@@ -239,12 +240,21 @@ export class SessionGoals {
 		);
 	}
 
-	async accountUsage(message: AssistantMessage, owner?: GoalStateWriteOwner): Promise<boolean> {
+	async waitForUsage(): Promise<void> {
+		while (this._goalUsageWrites.size > 0) await Promise.all(this._goalUsageWrites);
+	}
+
+	accountUsage(message: AssistantMessage, owner?: GoalStateWriteOwner): Promise<boolean> {
+		const write = this._accountUsage(message, owner);
+		this._goalUsageWrites.add(write);
+		const settled = () => this._goalUsageWrites.delete(write);
+		void write.then(settled, settled);
+		return write;
+	}
+
+	private async _accountUsage(message: AssistantMessage, owner?: GoalStateWriteOwner): Promise<boolean> {
 		if (owner) owner.assertCurrent();
 		if (!this._goalState.objective) {
-			return false;
-		}
-		if (message.stopReason === "error" || message.stopReason === "aborted") {
 			return false;
 		}
 		if (this._goalAccountedAssistantMessages.has(message)) {

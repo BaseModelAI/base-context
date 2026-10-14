@@ -1255,12 +1255,13 @@ export function takeNativePlannerRequestWrite(
  * here can take many seconds, during which the kernel or another session may write
  * the shared `harness_state.json`.
  */
-/** Mint a refinement id in the canonical `refine_<timestamp>` format. */
+/** Mint a timestamped refinement id that stays distinct across sessions. */
 export function generateRefinementId(): string {
-	return `refine_${new Date()
+	const timestamp = new Date()
 		.toISOString()
 		.replace(/[^0-9]/g, "")
-		.slice(0, 17)}`;
+		.slice(0, 17);
+	return `refine_${timestamp}_${randomUUID()}`;
 }
 
 export async function planRefinement(
@@ -1276,6 +1277,7 @@ export async function planRefinement(
 	requests?: InferenceCoordinator,
 	useConfiguredThinkingLevel = false,
 ): Promise<RefinementPlan> {
+	signal?.throwIfAborted();
 	const id = generateRefinementId();
 	if (options.rollbackId) {
 		const target = history.find((item) => item.id === options.rollbackId);
@@ -1335,6 +1337,8 @@ export async function planRefinement(
 		},
 	);
 	const response = await completion;
+	signal?.throwIfAborted();
+	if (response.stopReason === "aborted") throw new Error("Refinement aborted");
 
 	if (response.stopReason === "error") {
 		throw new Error(`Refinement failed: ${response.errorMessage || "Unknown error"}`);
@@ -1390,6 +1394,7 @@ export async function reviewAutoRefine(
 	requests?: InferenceCoordinator,
 	useConfiguredThinkingLevel = false,
 ): Promise<AutoRefineReview> {
+	signal?.throwIfAborted();
 	const conversationText = serializeConversation(convertToLlm(messages)).slice(-40_000);
 	const userPrompt = [
 		`<trigger>
@@ -1428,6 +1433,8 @@ ${conversationText}
 			semanticEdgeId: headers?.[MODEL_REQUEST_ID_HEADER],
 		},
 	);
+	signal?.throwIfAborted();
+	if (response.stopReason === "aborted") throw new Error("Auto-refine review aborted");
 	if (response.stopReason === "error") {
 		throw new Error(`Auto-refine review failed: ${response.errorMessage || "Unknown error"}`);
 	}
@@ -1469,6 +1476,7 @@ export async function refineHarness(
 		thinkingLevel,
 		requests,
 	);
+	signal?.throwIfAborted();
 	return applyRefinementProposal(state, plan.proposal, {
 		id: plan.id,
 		rollbackOf: plan.rollbackOf,

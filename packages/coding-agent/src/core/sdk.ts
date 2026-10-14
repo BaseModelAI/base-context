@@ -217,7 +217,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		let model = options.model ?? undefined;
 		let modelFallbackMessage: string | undefined;
 
-		if (options.model === undefined && hasExistingSession && existingSession.model) {
+		if (options.model === undefined && existingSession.model) {
 			const saved = existingSession.model;
 			const restoredModel = modelRegistry.find(saved.provider, saved.modelId);
 			model = restoredModel;
@@ -248,17 +248,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 
-		let thinkingLevel = options.thinkingLevel;
-
-		if (thinkingLevel === undefined && hasExistingSession) {
-			thinkingLevel = hasThinkingEntry
+		let thinkingLevel =
+			options.thinkingLevel ??
+			(hasThinkingEntry
 				? (existingSession.thinkingLevel as ThinkingLevel)
-				: (settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL);
-		}
-
-		if (thinkingLevel === undefined) {
-			thinkingLevel = settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
-		}
+				: (settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL));
 
 		if (!model) {
 			thinkingLevel = "off";
@@ -385,10 +379,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				await sessionManager.appendThinkingLevelChange(thinkingLevel);
 			}
 		} else {
-			if (model) {
+			if (
+				model &&
+				(model.provider !== existingSession.model?.provider || model.id !== existingSession.model?.modelId)
+			) {
 				await sessionManager.appendModelChange(model.provider, model.id);
 			}
-			await sessionManager.appendThinkingLevelChange(thinkingLevel);
+			if (!hasThinkingEntry || thinkingLevel !== existingSession.thinkingLevel) {
+				await sessionManager.appendThinkingLevelChange(thinkingLevel);
+			}
 		}
 		if (!hasServiceTierEntry) {
 			await sessionManager.appendServiceTierChange(serviceTierPreference);

@@ -4354,6 +4354,9 @@ export class AgentDaemon {
 				state.pendingAttaches++;
 				try {
 					result = await this.createAttachResult(client, state, command);
+					if (client.socket.destroyed) {
+						throw new Error("Daemon client disconnected during attach");
+					}
 					if (
 						this.sessions.get(state.activeSessionId) !== state ||
 						this.closingSessions.has(state.activeSessionId)

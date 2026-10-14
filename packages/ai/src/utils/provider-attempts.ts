@@ -309,15 +309,22 @@ export class ProviderAttemptTracker {
 		operation?: "input-count",
 	): (...args: TArgs) => Promise<Response> {
 		return async (...args) => {
+			const request = typeof Request !== "undefined" && args[0] instanceof Request ? args[0] : undefined;
 			const requestInit = args[1] as { signal?: AbortSignal | null } | undefined;
-			// SDKs can leave their abort callback attached after a response. A derived
-			// signal keeps those callbacks off the caller's long-lived cancellation source.
+			const requestSignal = requestInit?.signal ?? request?.signal;
+			const ownerSignal = this.options?.signal;
+			// SDKs can miss an earlier abort when deriving their request signal.
+			// Keep the owning cancellation source as well as SDK timeouts.
+			const sources = [requestSignal, ownerSignal].filter((source): source is AbortSignal => !!source);
 			let signal: AbortSignal | undefined;
-			if (requestInit?.signal) {
+			if (sources.length > 0) {
 				this.httpLifetime ??= new AbortController();
-				signal = AbortSignal.any([requestInit.signal, this.httpLifetime.signal]);
+				signal = AbortSignal.any([...sources, this.httpLifetime.signal]);
 			}
-			if (signal) args[1] = { ...requestInit, signal };
+			if (signal) {
+				if (request && !requestInit) args[0] = new Request(request, { signal });
+				else args[1] = { ...requestInit, signal };
+			}
 			if (!this.enabled) {
 				signal?.throwIfAborted();
 				return send(...args);
@@ -326,7 +333,12 @@ export class ProviderAttemptTracker {
 			if (this.hasRequestBudget && operation !== "input-count") {
 				const target = args[0];
 				const init = args[1] as { body?: unknown } | undefined;
-				const body = typeof init?.body === "string" ? init.body : undefined;
+				const body =
+					typeof init?.body === "string"
+						? init.body
+						: init?.body === undefined && typeof Request !== "undefined" && target instanceof Request
+							? await target.clone().text()
+							: undefined;
 				const url =
 					typeof target === "string"
 						? target

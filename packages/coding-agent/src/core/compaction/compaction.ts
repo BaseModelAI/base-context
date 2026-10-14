@@ -611,11 +611,17 @@ Keep each section concise. Preserve exact file paths, function names, and error 
  * update template, optional user instructions, and requirement/runtime-state qualifications.
  */
 export function buildSummarizationPrompt(customInstructions?: string, previousSummary?: string): string {
-	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
-	if (customInstructions) {
-		basePrompt += `\n\n<user-instructions>\nThe user provided these instructions for this summary. Follow them with high priority while keeping the section format above: emphasize what they ask to focus on, and preserve verbatim anything they ask to remember.\n${customInstructions}\n</user-instructions>`;
-	}
+	const basePrompt = appendSummaryInstructions(
+		previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT,
+		customInstructions,
+	);
 	return `${basePrompt}\n\n${BINDING_REQUIREMENTS_SUMMARY_NOTE}\n\n${RUNTIME_STATE_SUMMARY_NOTE}`;
+}
+
+function appendSummaryInstructions(prompt: string, customInstructions?: string): string {
+	return customInstructions
+		? `${prompt}\n\n<user-instructions>\nThe user provided these instructions for this summary. Follow them with high priority while keeping the section format above: emphasize what they ask to focus on, and preserve verbatim anything they ask to remember.\n${customInstructions}\n</user-instructions>`
+		: prompt;
 }
 
 /**
@@ -1037,6 +1043,7 @@ export async function compact(
 					apiKey,
 					callHeaders,
 					signal,
+					customInstructions,
 					thinkingLevel,
 					requests,
 					turnLimit,
@@ -1102,13 +1109,15 @@ async function generateTurnPrefixSummary(
 	apiKey: string,
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
+	customInstructions?: string,
 	thinkingLevel?: ThinkingLevel,
 	requests?: InferenceCoordinator,
 	outputTokenLimit?: number,
 ): Promise<SummarySlice> {
 	const maxTokens = outputTokenLimit ?? (getCodexContextPolicy(model) ? undefined : Math.floor(0.5 * reserveTokens));
-	const conversationText = serializeConversation(messages);
-	const promptText = `${TURN_PREFIX_SUMMARIZATION_PROMPT}\n\n<conversation>\n${conversationText}\n</conversation>`;
+	const conversationText = `<conversation>\n${serializeConversation(messages)}\n</conversation>`;
+	const prompt = appendSummaryInstructions(TURN_PREFIX_SUMMARIZATION_PROMPT, customInstructions);
+	const promptText = customInstructions ? `${conversationText}\n\n${prompt}` : `${prompt}\n\n${conversationText}`;
 	const summarizationMessages = [
 		{
 			role: "user" as const,

@@ -333,16 +333,29 @@ export class DaemonAgentConnection implements AgentConnection {
 		activeSessionId: string,
 		options?: DaemonAgentConnectionOptions,
 	): Promise<DaemonAgentConnection> {
-		const transport = await createDaemonSessionTransport(
-			client,
-			activeSessionId,
-			options?.ownedSession === true || options?.directTransport === false,
-		);
+		let upgradeClose: Error | undefined;
+		const unsubscribeUpgradeClose = client.onClose((error) => {
+			upgradeClose = error;
+		});
+		let transport: DaemonTransportClient;
+		try {
+			transport = await createDaemonSessionTransport(
+				client,
+				activeSessionId,
+				options?.ownedSession === true || options?.directTransport === false,
+			);
+		} finally {
+			unsubscribeUpgradeClose();
+		}
 		const connection = new DaemonAgentConnection(transport, activeSessionId, options);
 		connection.initialAttachPending = true;
+		if (transport instanceof DaemonRoutedClient && transport.hasDirectTransport) {
+			connection.initialControlPlaneClose = upgradeClose;
+		}
 		try {
 			try {
-				await connection.attach();
+				// Initial attach owns failure handling; its close handler cannot reconnect a parked request.
+				await connection.attach({ recoverable: false });
 			} catch (error) {
 				if (!(transport instanceof DaemonRoutedClient)) throw error;
 				transport.fallbackToSupervisor();
@@ -1527,6 +1540,41 @@ export class DaemonAgentConnection implements AgentConnection {
 	}
 
 	async watchSession(activeSessionId: string): Promise<AgentConnectionSessionWatcher | undefined> {
+		if (activeSessionId === this.activeSessionId) {
+			// The primary owns this attachment; observing it must not attach or detach it again.
+			const listeners = new Set<AgentConnectionEventListener>();
+			let closed = false;
+			const close = () => {
+				closed = true;
+				unsubscribe();
+				listeners.clear();
+			};
+			const unsubscribe = this.subscribe(async (event) => {
+				const observed: AgentConnectionEvent =
+					this.activeSessionId === activeSessionId
+						? event
+						: { type: "closed", error: "Observed session is no longer attached to this connection." };
+				const deliveries = [...listeners].map((listener) => Promise.resolve().then(() => listener(observed)));
+				if (observed.type === "closed") close();
+				await Promise.allSettled(deliveries);
+			});
+			const read = <T>(operation: () => Promise<T>): Promise<T> => {
+				if (closed || this.activeSessionId !== activeSessionId) {
+					return Promise.reject(new Error("Session watcher is closed."));
+				}
+				return operation();
+			};
+			return {
+				getMessages: () => read(() => this.getMessages()),
+				getCommands: () => read(() => this.getCommands()),
+				getToolDefinition: (name) => read(() => this.getToolDefinition(name)),
+				subscribe: (listener) => {
+					if (!closed) listeners.add(listener);
+					return () => listeners.delete(listener);
+				},
+				close: async () => close(),
+			};
+		}
 		// A second connection on the shared client; each one filters to its own session id.
 		// attach() rejects for an unknown/exited session — treat that as unreachable.
 		let connection: DaemonAgentConnection;
@@ -1536,6 +1584,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			connection = await DaemonAgentConnection.attach(watchClient, activeSessionId, {
 				closeClientOnDispose: false,
 				directTransport: false,
+				supportsExtensionUi: false,
 			});
 		} catch {
 			return undefined;
@@ -1700,7 +1749,12 @@ export class DaemonAgentConnection implements AgentConnection {
 		timeoutMs?: number,
 		options?: Parameters<DaemonTransportClient["request"]>[2],
 	): Promise<T> {
-		const response = await this.client.request(command, timeoutMs, options);
+		// Disposal has disabled this connection's reconnect loop; cleanup must fail rather than park.
+		const response = await this.client.request(
+			command,
+			timeoutMs,
+			this.disposed ? { ...options, recoverable: false } : options,
+		);
 		if (!response.success) {
 			const error = deserializeDaemonError(response);
 			this.definitiveRequestErrors.add(error);

@@ -106,7 +106,7 @@ function sumOwnUsage(root: ContextTreeNode): Usage {
 }
 
 const GOAL_SCOPE =
-	"Goal budget: root successful main uncached input + output only; excludes cache, children and auxiliary requests";
+	"Goal budget: root-main reported uncached input + output (including failed/aborted responses); excludes cache, children and auxiliary requests";
 
 function formatReceiptContextTree(root: ContextTreeNode, width: number): string {
 	const rows = flattenContextTree(root);

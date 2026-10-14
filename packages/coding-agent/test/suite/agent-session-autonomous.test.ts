@@ -121,7 +121,7 @@ describe("AgentSession autonomous mode", () => {
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
 	});
 
-	it("does not count failed assistant messages against autonomous usage limits", async () => {
+	it("counts failed assistant usage without charging a completed turn", async () => {
 		const harness = await createHarness({
 			autonomous: { enabled: true, maxTurns: 1 },
 		});
@@ -130,9 +130,13 @@ describe("AgentSession autonomous mode", () => {
 
 		await harness.session.prompt("try once");
 
+		const failed = harness.session.messages.find((message) => message.role === "assistant");
+		if (failed?.role !== "assistant") throw new Error("Missing failed assistant message");
+		const tokensUsed = failed.usage.input + failed.usage.output + failed.usage.cacheWrite;
+		expect(tokensUsed).toBeGreaterThan(0);
 		expect(harness.session.getAutonomousStatus()).toMatchObject({
 			turnsUsed: 0,
-			tokensUsed: 0,
+			tokensUsed,
 			continuationsUsed: 0,
 		});
 	});

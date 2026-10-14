@@ -1268,6 +1268,7 @@ export class AgentSession {
 		() => this.sessionManager,
 		() => this._emitGoalUpdate(),
 	);
+	private _hostGoalCreationPending = false;
 	private _goalContinuationAwaitsRlmWork = false;
 	private _goalContinuationHasProgress = false;
 	private _jobWatchController?: JobWatchController;
@@ -1537,6 +1538,7 @@ export class AgentSession {
 		this._contextEpochsEnabled = requestTokenBudget !== undefined;
 		const contextEpochsEnabled = this._contextEpochsEnabled;
 		this.agent.bindContextOwner(async () => {
+			const signal = this.agent.signal;
 			await this.initialize();
 			await this._goalResumeOperation;
 			await this._waitForAgentEventsBeforeContext();
@@ -1564,12 +1566,12 @@ export class AgentSession {
 			const controls = this._contextOmissions;
 			const omitted = new Set(controls?.ids);
 			const epochManager = this.sessionManager;
-			const resource = await this._captureKernelResource(this.agent.signal);
+			const resource = await this._captureKernelResource(signal);
 			assertHarnessSourceCurrent();
-			const compaction = epochManager.bindCompactionSink({
-				maxEntries: limits.maxMessages,
-				maxSourceBytes: limits.maxSourceBytes,
-			});
+			const compaction = epochManager.bindCompactionSink(
+				{ maxEntries: limits.maxMessages, maxSourceBytes: limits.maxSourceBytes },
+				() => signal?.throwIfAborted(),
+			);
 			let captured: InferenceCoordinator;
 			try {
 				captured = this.requests.capture(compaction);
@@ -4528,6 +4530,9 @@ export class AgentSession {
 	}
 
 	private async _createGoalFromHost(objective: string, tokenBudget: number | undefined): Promise<GoalState> {
+		if (this._hostGoalCreationPending) {
+			throw new Error("cannot create a new goal while another goal.create request is pending");
+		}
 		switch (this._goals.state.status) {
 			case "active":
 				throw new Error(
@@ -4542,24 +4547,42 @@ export class AgentSession {
 					"cannot create a new goal because a budget-limited goal exists; ask the user to resume it with /goal resume or clear it with /goal clear",
 				);
 			default:
-				// idle, or a terminal record (complete / error): nothing pending, start fresh.
-				return this._startGoal(
-					objective,
-					tokenBudget,
-					this.sessionManager[bindNativeEntryWriter]().captureGoalOperation({
-						version: 1,
-						kind: "goal_operation",
-						operation: "create",
-						actor: "runtime",
-						submittedText: objective,
-					}),
-				);
+				// Reserve creation until its state is published; the host bridge admits concurrent requests.
+				this._hostGoalCreationPending = true;
+				try {
+					return await this._startGoal(
+						objective,
+						tokenBudget,
+						this.sessionManager[bindNativeEntryWriter]().captureGoalOperation({
+							version: 1,
+							kind: "goal_operation",
+							operation: "create",
+							actor: "runtime",
+							submittedText: objective,
+						}),
+					);
+				} finally {
+					this._hostGoalCreationPending = false;
+				}
 		}
 	}
 
 	private async _completeGoalFromHost(): Promise<GoalState> {
 		if (!this._goals.state.objective || this._goals.state.status === "idle") {
 			throw new Error("cannot complete goal because this thread has no goal");
+		}
+		const manager = this.sessionManager;
+		const ownsSource = manager.captureCompactionSourceOwner();
+		const goalId = this._goals.state.goalId;
+		await this._goals.waitForUsage();
+		if (
+			this._disposed ||
+			this._disposing ||
+			this.sessionManager !== manager ||
+			!ownsSource() ||
+			this._goals.state.goalId !== goalId
+		) {
+			throw new StaleGoalContinuationError("Goal completion owner changed");
 		}
 		const goal = this._goals.withAccountedWallClock();
 		// A turn can cross the budget and complete the goal at once: accounting
@@ -5108,9 +5131,7 @@ export class AgentSession {
 				this._lastAssistantMessage = event.message;
 
 				const assistantMsg = event.message as AssistantMessage;
-				if (assistantMsg.stopReason !== "error") {
-					addAutonomousUsage(this._autonomousState, assistantMsg.usage);
-				}
+				addAutonomousUsage(this._autonomousState, assistantMsg.usage, assistantMsg.stopReason !== "error");
 				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted") {
 					this._assistantTurnsSinceAutoRefine++;
 					// In serialized mode, kick off background refinement planning
@@ -6511,6 +6532,7 @@ export class AgentSession {
 				}
 				options?.admissionCommitted?.();
 				const expandPromptTemplates = isInternalPrompt ? false : (options?.expandPromptTemplates ?? true);
+				const normalizationEpoch = this._sessionInputPumpEpoch;
 				const normalizationResult = this._normalizeSubmission(text, options?.images, {
 					parseSessionCommands: !isInternalPrompt && !options?.skipPrePromptWork,
 					extensionCommands: expandPromptTemplates ? "execute" : "ignore",
@@ -6522,10 +6544,13 @@ export class AgentSession {
 					expandPromptTemplates,
 				});
 				const normalized = normalizationResult instanceof Promise ? await normalizationResult : normalizationResult;
-				// Async input handlers ran between the admission check above and
-				// admission itself; re-check so content invalidated during that
-				// await (e.g. a cron job cancelled or updated) is not admitted.
-				if (normalizationResult instanceof Promise) options?.admissionCommitted?.();
+				if (normalizationResult instanceof Promise) {
+					throwIfPromptAdmissionCancelled(options?.signal);
+					if (normalizationEpoch !== this._sessionInputPumpEpoch) {
+						throw new Error("Session input was invalidated during normalization");
+					}
+					options?.admissionCommitted?.();
+				}
 				if (normalized.kind === "extensionCommand") {
 					commitFence?.release();
 					reportPreflight(true);
@@ -11934,7 +11959,7 @@ export class AgentSession {
 		)
 			return result(state.reference.view.ref.entryId, state.capture);
 		const capture = captureSelectedSkill(descriptor);
-		const ref = await owner.writer.append(capture, modelInvocation ? "model" : "command");
+		const ref = await owner.writer.append(capture, modelInvocation ? "model" : "command", assertCurrent);
 		assertCurrent(); // A completed source append is not rolled back on cancellation or owner change.
 		return result(ref, capture);
 	}
@@ -13334,24 +13359,22 @@ export class AgentSession {
 					emitChildUpdate();
 				};
 				update();
-				if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
-					const messages = child.messages;
-					const precedingPrompt = messages
-						.slice(0, messages.lastIndexOf(assistant))
-						.reverse()
-						.find(
-							(message) =>
-								message.role === "user" ||
-								(message.role === "custom" && message.customType !== HARNESS_SNAPSHOT_CUSTOM_TYPE),
-						);
-					const origin =
-						precedingPrompt?.role === "custom" && isAgentSessionMessage(precedingPrompt)
-							? precedingPrompt.details.id.startsWith("spawn:")
-								? "spawn_task"
-								: "agent_message"
-							: "direct_user";
-					void attributeUsage(assistant.usage, origin).then(update, () => {});
-				}
+				const messages = child.messages;
+				const precedingPrompt = messages
+					.slice(0, messages.lastIndexOf(assistant))
+					.reverse()
+					.find(
+						(message) =>
+							message.role === "user" ||
+							(message.role === "custom" && message.customType !== HARNESS_SNAPSHOT_CUSTOM_TYPE),
+					);
+				const origin =
+					precedingPrompt?.role === "custom" && isAgentSessionMessage(precedingPrompt)
+						? precedingPrompt.details.id.startsWith("spawn:")
+							? "spawn_task"
+							: "agent_message"
+						: "direct_user";
+				void attributeUsage(assistant.usage, origin).then(update, () => {});
 			} else if (event.type === "message_start" || event.type === "message_update") {
 				if (event.message.role === "assistant") {
 					if (event.type === "message_start") generation++;
@@ -14208,13 +14231,13 @@ export class AgentSession {
 					run.deletionRunFinished = true;
 					if (!run.settled) {
 						let cleanupSucceeded = !run.deletionCleanupFailed;
-						if (childRuntime && cleanupSucceeded) {
-							const cleanup =
-								run.deletionCleanup ?? this._ensureRlmRunDeletionCleanup(run, childRuntime.session);
+						const cleanupSession = childRuntime?.session ?? childSession;
+						if (cleanupSession && cleanupSucceeded) {
+							const cleanup = run.deletionCleanup ?? this._ensureRlmRunDeletionCleanup(run, cleanupSession);
 							cleanupSucceeded = await this._observeRlmRunDeletionCleanup(
 								run,
 								run.detachedDeletion,
-								childRuntime.session,
+								cleanupSession,
 								cleanup,
 							);
 						}

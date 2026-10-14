@@ -78,6 +78,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 	private subagentRuntimeHost?: SubagentRuntimeHost;
 	private subagentRuntimes = new Map<string, AgentSessionRuntime>();
 	private disposePromise?: Promise<void>;
+	private readonly sessionReplacements = new Set<Promise<unknown>>();
 	private autoRefineAdmissionClosed = false;
 
 	constructor(
@@ -208,14 +209,16 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 	}
 
 	private async teardownCurrent(reason: SessionShutdownEvent["reason"], targetSessionFile?: string): Promise<void> {
-		await emitSessionShutdownEvent(this.session.extensionRunner, {
+		const session = this.session;
+		await emitSessionShutdownEvent(session.extensionRunner, {
 			type: "session_shutdown",
 			reason,
 			targetSessionFile,
 		});
+		if (this.session !== session) throw new Error("Session changed during replacement shutdown");
 		this.beforeSessionInvalidate?.();
 		// Await the kernel's final snapshot flush before invalidating the session.
-		await this.session.disposeAsync();
+		await session.disposeAsync();
 		await this.disposeHostedSubagentRuntimes();
 	}
 
@@ -271,11 +274,12 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		reason: "new" | "resume" | "fork",
 		teardown = true,
 		setup?: (manager: SessionManager) => Promise<void>,
-	): Promise<void> {
+	): Promise<AgentSession> {
 		let lease: SessionLease | undefined;
 		let result: CreateAgentSessionRuntimeResult | undefined;
 		try {
-			if (this.session !== source.session) throw new Error("Session changed before replacement");
+			if (this.disposePromise || this.session !== source.session)
+				throw new Error("Session changed before replacement");
 			lease = this.acquireReplacementLease(sessionManager.getSessionFile());
 			if (teardown) await this.teardownCurrent(reason, sessionManager.getSessionFile());
 			result = await this.scopedBuild(() =>
@@ -293,9 +297,11 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 				await sessionManager.flushNow();
 				result.session.agent.state.messages = (await result.session.buildSessionContext()).messages;
 			}
-			if (this.session !== source.session) throw new Error("Session changed during replacement");
+			if (this.disposePromise || this.session !== source.session)
+				throw new Error("Session changed during replacement");
 			this.apply(result);
 			this.commitReplacementLease(lease);
+			return result.session;
 		} catch (error) {
 			try {
 				if (result) await result.session.disposeAsync();
@@ -485,21 +491,42 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		}
 	}
 
-	private async finishSessionReplacement(withSession?: (ctx: ReplacedSessionContext) => Promise<void>): Promise<void> {
+	private async finishSessionReplacement(
+		session: AgentSession,
+		withSession?: (ctx: ReplacedSessionContext) => Promise<void>,
+	): Promise<void> {
+		const assertCurrent = () => {
+			if (this.session !== session) throw new Error("Session changed during replacement binding");
+		};
+		assertCurrent();
 		if (this.rebindSession) {
-			await this.rebindSession(this.session);
+			await this.rebindSession(session);
 		}
 		for (const listener of this.sessionReplacedListeners) {
-			await listener(this.session);
+			assertCurrent();
+			await listener(session);
 		}
+		assertCurrent();
 		if (withSession) {
-			await withSession(this.session.createReplacedSessionContext());
+			await withSession(session.createReplacedSessionContext());
 		}
 	}
 
 	private assertCanReplaceSession(): void {
+		if (this.disposePromise) throw new Error("Session runtime is disposing or disposed");
 		if (this.metadata.kind === "subagent" || this.session.hasRlmParentAdmission) {
 			throw new Error("Owned child-runtime replacement is unavailable; dispose or passivate the child instead");
+		}
+	}
+
+	private async withSessionReplacement<T>(replace: () => Promise<T>): Promise<T> {
+		this.assertCanReplaceSession();
+		const operation = Promise.resolve().then(replace);
+		this.sessionReplacements.add(operation);
+		try {
+			return await operation;
+		} finally {
+			this.sessionReplacements.delete(operation);
 		}
 	}
 
@@ -507,37 +534,43 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		sessionPath: string,
 		options?: { cwdOverride?: string; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
 	): Promise<{ cancelled: boolean }> {
-		this.assertCanReplaceSession();
-		const source = { session: this.session, sessionFile: this.session.sessionFile, agentDir: this.services.agentDir };
-		const fallbackCwd = this.cwd;
-		const cwdOverride = options?.cwdOverride;
-		const withSession = options?.withSession;
-		const samePath =
-			source.sessionFile !== undefined &&
-			canonicalSessionPath(source.sessionFile) === canonicalSessionPath(sessionPath);
-		const beforeResult = await this.emitBeforeSwitch("resume", sessionPath);
-		if (beforeResult.cancelled) return beforeResult;
-		if (this.session !== source.session) throw new Error("Session changed before replacement");
+		return this.withSessionReplacement(async () => {
+			const source = {
+				session: this.session,
+				sessionFile: this.session.sessionFile,
+				agentDir: this.services.agentDir,
+			};
+			const fallbackCwd = this.cwd;
+			const cwdOverride = options?.cwdOverride;
+			const withSession = options?.withSession;
+			const samePath =
+				source.sessionFile !== undefined &&
+				canonicalSessionPath(source.sessionFile) === canonicalSessionPath(sessionPath);
+			const beforeResult = await this.emitBeforeSwitch("resume", sessionPath);
+			if (beforeResult.cancelled) return beforeResult;
+			if (this.session !== source.session) throw new Error("Session changed before replacement");
 
-		if (samePath) {
-			const view = await SessionManager.openReadOnly(sessionPath, undefined, cwdOverride);
-			try {
-				assertSessionCwdExists(view, fallbackCwd);
-			} finally {
-				await view.close();
+			if (samePath) {
+				const view = await SessionManager.openReadOnly(sessionPath, undefined, cwdOverride);
+				try {
+					assertSessionCwdExists(view, fallbackCwd);
+				} finally {
+					await view.close();
+				}
+				if (this.session !== source.session) throw new Error("Session changed before replacement");
+				await this.teardownCurrent("resume", sessionPath);
 			}
-			await this.teardownCurrent("resume", sessionPath);
-		}
-		const sessionManager = await SessionManager.open(sessionPath, undefined, cwdOverride);
-		try {
-			assertSessionCwdExists(sessionManager, fallbackCwd);
-		} catch (error) {
-			await sessionManager.close();
-			throw error;
-		}
-		await this.replaceWithManager(sessionManager, source, "resume", !samePath);
-		await this.finishSessionReplacement(withSession);
-		return { cancelled: false };
+			const sessionManager = await SessionManager.open(sessionPath, undefined, cwdOverride);
+			try {
+				assertSessionCwdExists(sessionManager, fallbackCwd);
+			} catch (error) {
+				await sessionManager.close();
+				throw error;
+			}
+			const replacement = await this.replaceWithManager(sessionManager, source, "resume", !samePath);
+			await this.finishSessionReplacement(replacement, withSession);
+			return { cancelled: false };
+		});
 	}
 
 	async newSession(options?: {
@@ -545,24 +578,29 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}): Promise<{ cancelled: boolean }> {
-		this.assertCanReplaceSession();
-		const source = { session: this.session, sessionFile: this.session.sessionFile, agentDir: this.services.agentDir };
-		const cwd = this.cwd;
-		const sessionDir = source.session.sessionManager.getSessionDir();
-		const headerOptions = options?.parentSession
-			? {
-					parentSession: options.parentSession,
-					rlmDepth: source.session.sessionManager.getHeader()?.rlmDepth ?? source.session.rlmDepth,
-				}
-			: undefined;
-		const setup = options?.setup;
-		const withSession = options?.withSession;
-		const beforeResult = await this.emitBeforeSwitch("new");
-		if (beforeResult.cancelled) return beforeResult;
-		const sessionManager = await SessionManager.create(cwd, sessionDir, headerOptions);
-		await this.replaceWithManager(sessionManager, source, "new", true, setup);
-		await this.finishSessionReplacement(withSession);
-		return { cancelled: false };
+		return this.withSessionReplacement(async () => {
+			const source = {
+				session: this.session,
+				sessionFile: this.session.sessionFile,
+				agentDir: this.services.agentDir,
+			};
+			const cwd = this.cwd;
+			const sessionDir = source.session.sessionManager.getSessionDir();
+			const headerOptions = options?.parentSession
+				? {
+						parentSession: options.parentSession,
+						rlmDepth: source.session.sessionManager.getHeader()?.rlmDepth ?? source.session.rlmDepth,
+					}
+				: undefined;
+			const setup = options?.setup;
+			const withSession = options?.withSession;
+			const beforeResult = await this.emitBeforeSwitch("new");
+			if (beforeResult.cancelled) return beforeResult;
+			const sessionManager = await SessionManager.create(cwd, sessionDir, headerOptions);
+			const replacement = await this.replaceWithManager(sessionManager, source, "new", true, setup);
+			await this.finishSessionReplacement(replacement, withSession);
+			return { cancelled: false };
+		});
 	}
 
 	async fork(
@@ -572,42 +610,47 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 		},
 	): Promise<{ cancelled: boolean; selectedText?: string }> {
-		this.assertCanReplaceSession();
-		const source = { session: this.session, sessionFile: this.session.sessionFile, agentDir: this.services.agentDir };
-		const rlmDepth = source.session.rlmDepth;
-		const withSession = options?.withSession;
-		const position = options?.position ?? "before";
-		const runner = source.session.extensionRunner;
-		const preparation = Promise.allSettled([
-			source.session.sessionManager.prepareFork(entryId, { position, rlmDepth }),
-		]);
-		const [beforeResult] = await Promise.allSettled([
-			this.emitBeforeFork(runner, entryId, { position }),
-			preparation,
-		]);
-		// Join the independent source read before handling hook failure or cancellation.
-		if (beforeResult.status === "rejected") throw beforeResult.reason;
-		if (beforeResult.value.cancelled) {
-			return { cancelled: true };
-		}
-		const [preparedResult] = await preparation;
-		if (preparedResult.status === "rejected") throw preparedResult.reason;
-		const prepared = preparedResult.value;
-		if (this.session !== source.session) throw new Error("Session changed before replacement");
-
-		let selectedText: string | undefined;
-		if (position === "before") {
-			const selectedEntry = prepared.selectedEntry;
-			if (selectedEntry.type !== "message" || selectedEntry.message.role !== "user") {
-				throw new Error("Invalid entry ID for forking");
+		return this.withSessionReplacement(async () => {
+			const source = {
+				session: this.session,
+				sessionFile: this.session.sessionFile,
+				agentDir: this.services.agentDir,
+			};
+			const rlmDepth = source.session.rlmDepth;
+			const withSession = options?.withSession;
+			const position = options?.position ?? "before";
+			const runner = source.session.extensionRunner;
+			const preparation = Promise.allSettled([
+				source.session.sessionManager.prepareFork(entryId, { position, rlmDepth }),
+			]);
+			const [beforeResult] = await Promise.allSettled([
+				this.emitBeforeFork(runner, entryId, { position }),
+				preparation,
+			]);
+			// Join the independent source read before handling hook failure or cancellation.
+			if (beforeResult.status === "rejected") throw beforeResult.reason;
+			if (beforeResult.value.cancelled) {
+				return { cancelled: true };
 			}
-			selectedText = extractUserMessageText(selectedEntry.message.content);
-		}
+			const [preparedResult] = await preparation;
+			if (preparedResult.status === "rejected") throw preparedResult.reason;
+			const prepared = preparedResult.value;
+			if (this.session !== source.session) throw new Error("Session changed before replacement");
 
-		const sessionManager = await prepared.create();
-		await this.replaceWithManager(sessionManager, source, "fork");
-		await this.finishSessionReplacement(withSession);
-		return { cancelled: false, selectedText };
+			let selectedText: string | undefined;
+			if (position === "before") {
+				const selectedEntry = prepared.selectedEntry;
+				if (selectedEntry.type !== "message" || selectedEntry.message.role !== "user") {
+					throw new Error("Invalid entry ID for forking");
+				}
+				selectedText = extractUserMessageText(selectedEntry.message.content);
+			}
+
+			const sessionManager = await prepared.create();
+			const replacement = await this.replaceWithManager(sessionManager, source, "fork");
+			await this.finishSessionReplacement(replacement, withSession);
+			return { cancelled: false, selectedText };
+		});
 	}
 
 	/**
@@ -618,30 +661,36 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 	 * @throws {MissingSessionCwdError} When the imported session cwd cannot be resolved and no override is provided.
 	 */
 	async importFromJsonl(inputPath: string, cwdOverride?: string): Promise<{ cancelled: boolean }> {
-		this.assertCanReplaceSession();
-		const resolvedPath = resolve(inputPath);
-		if (!existsSync(resolvedPath)) throw new SessionImportFileNotFoundError(resolvedPath);
-		const source = { session: this.session, sessionFile: this.session.sessionFile, agentDir: this.services.agentDir };
-		const sessionDir = source.session.sessionManager.getSessionDir();
-		const fallbackCwd = this.cwd;
-		const beforeResult = await this.emitBeforeSwitch("resume", resolvedPath);
-		if (beforeResult.cancelled) return beforeResult;
+		return this.withSessionReplacement(async () => {
+			const resolvedPath = resolve(inputPath);
+			if (!existsSync(resolvedPath)) throw new SessionImportFileNotFoundError(resolvedPath);
+			const source = {
+				session: this.session,
+				sessionFile: this.session.sessionFile,
+				agentDir: this.services.agentDir,
+			};
+			const sessionDir = source.session.sessionManager.getSessionDir();
+			const fallbackCwd = this.cwd;
+			const beforeResult = await this.emitBeforeSwitch("resume", resolvedPath);
+			if (beforeResult.cancelled) return beforeResult;
 
-		const view = await SessionManager.openReadOnly(resolvedPath, undefined, cwdOverride);
-		let targetCwd: string;
-		try {
-			assertSessionCwdExists(view, fallbackCwd);
-			targetCwd = view.getCwd();
-		} finally {
-			await view.close();
-		}
-		const sessionManager = await SessionManager.importRetainedFrom(resolvedPath, targetCwd, sessionDir);
-		await this.replaceWithManager(sessionManager, source, "resume");
-		await this.finishSessionReplacement();
-		return { cancelled: false };
+			const view = await SessionManager.openReadOnly(resolvedPath, undefined, cwdOverride);
+			let targetCwd: string;
+			try {
+				assertSessionCwdExists(view, fallbackCwd);
+				targetCwd = view.getCwd();
+			} finally {
+				await view.close();
+			}
+			const sessionManager = await SessionManager.importRetainedFrom(resolvedPath, targetCwd, sessionDir);
+			const replacement = await this.replaceWithManager(sessionManager, source, "resume");
+			await this.finishSessionReplacement(replacement);
+			return { cancelled: false };
+		});
 	}
 
 	private async disposeOnce(options: AgentSessionRuntimeDisposeOptions): Promise<void> {
+		await Promise.allSettled(this.sessionReplacements);
 		let disposeError: unknown;
 		try {
 			await emitSessionShutdownEvent(this.session.extensionRunner, {

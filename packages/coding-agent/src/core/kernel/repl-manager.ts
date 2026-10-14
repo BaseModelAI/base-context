@@ -258,10 +258,8 @@ export class ReplKernelManager {
 	private readonly lateSentAgentMessageHandlers = new Map<string, (message: KernelSentAgentMessage) => void>();
 	/** Resolvers for done events outside the active execution (the shutdown reply). */
 	private readonly pendingDoneWaiters = new Map<string, () => void>();
-	// Source of the most recently started cell, retained after it finishes so
-	// rlm.run spawns from detached asyncio tasks (cell already idle) can still
-	// attribute their spawning program.
-	private lastCellCode?: string;
+	// Retain one user cell's source for detached host calls, qualified by its protocol id.
+	private lastUserCell?: { requestId: string; code: string };
 	/** Unattributed stream text that arrived between cells; surfaced on the next execution. */
 	private pendingBackgroundOutput = "";
 	private pendingBackgroundOutputTruncated = false;
@@ -824,7 +822,9 @@ export class ReplKernelManager {
 		this.state = "shutdown";
 		liveKernels.delete(this);
 		this.cleanupResources("SIGKILL");
-		this.state = "idle";
+		// A failed writer may retire the child while shutdown is still draining.
+		// Do not reopen admission after that teardown takes ownership.
+		if (this.teardownInFlight === 0) this.state = "idle";
 	}
 
 	private finishFailedProtocolRepair(owner: { superseded: boolean }, error?: unknown): void {
@@ -1153,7 +1153,7 @@ export class ReplKernelManager {
 			upstreamTruncated: false,
 			outputCapture:
 				opts.outputDirectory && !opts.internal ? new ToolOutputCapture(opts.outputDirectory) : undefined,
-			initialBackgroundTruncated: this.pendingBackgroundOutputTruncated,
+			initialBackgroundTruncated: !opts.internal && this.pendingBackgroundOutputTruncated,
 			diffs: [],
 			attachments: [],
 			sentAgentMessages: [],
@@ -1161,8 +1161,8 @@ export class ReplKernelManager {
 			nativeRecoveryBytes: 2, // JSON array brackets; reserve one delimiter per admitted response.
 			nativeRecoveryRequests: 0,
 			nativeRecoveryAbort: new AbortController(),
-			backgroundOutput: this.pendingBackgroundOutput,
-			backgroundOutputTruncated: this.pendingBackgroundOutputTruncated,
+			backgroundOutput: opts.internal ? "" : this.pendingBackgroundOutput,
+			backgroundOutputTruncated: !opts.internal && this.pendingBackgroundOutputTruncated,
 			status: "ok",
 			settled: false,
 			physicalSettlement: createDeferred<void>(),
@@ -1170,8 +1170,10 @@ export class ReplKernelManager {
 			reject: result.reject,
 		};
 		execution.outputCapture?.append("background (unattributed)", execution.backgroundOutput);
-		this.pendingBackgroundOutput = "";
-		this.pendingBackgroundOutputTruncated = false;
+		if (!opts.internal) {
+			this.pendingBackgroundOutput = "";
+			this.pendingBackgroundOutputTruncated = false;
+		}
 		let abortTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
 		const clearAbortTimer = () => {
 			if (abortTimer) {
@@ -1205,7 +1207,7 @@ export class ReplKernelManager {
 				onAbort();
 			}
 			if (!opts.internal) {
-				this.lastCellCode = code;
+				this.lastUserCell = { requestId, code };
 			}
 			let writeAttempted = false;
 			try {
@@ -1247,7 +1249,8 @@ export class ReplKernelManager {
 	private appendBackgroundOutput(text: string): void {
 		if (!text) return;
 		const execution = this.activeExecution;
-		if (execution) {
+		// State/bootstrap results are host-only; keep user background output for a visible cell.
+		if (execution && !execution.opts.internal) {
 			execution.outputCapture?.append("background (unattributed)", text);
 			if (execution.backgroundOutput.length >= MAX_BACKGROUND_OUTPUT_CHARS) {
 				execution.backgroundOutputTruncated = true;
@@ -1566,11 +1569,11 @@ export class ReplKernelManager {
 				execution.nativeRecoveryBytes -= reserved;
 			}
 		}
-		// Tag the request with the cell that triggered it. A blocking call is still
-		// the in-flight execution; detached spawns (asyncio.create_task) fire after
-		// the scheduling cell goes idle, so fall back to that last cell's source.
-		const cellSourceCode = this.activeExecution?.code ?? this.lastCellCode;
-		return handler({ ...data, cellSourceCode });
+		// Detached tasks retain their spawning cell id. Never substitute a newer or internal cell's source.
+		const request = { ...data };
+		if (this.lastUserCell && this.lastUserCell.requestId === cellId) request.cellSourceCode = this.lastUserCell.code;
+		else delete request.cellSourceCode;
+		return handler(request);
 	}
 
 	private async interrupt(): Promise<void> {

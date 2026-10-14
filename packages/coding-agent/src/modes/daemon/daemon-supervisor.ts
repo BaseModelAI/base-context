@@ -697,6 +697,14 @@ function isFinalizedTranscriptEvent(eventType: string | undefined): boolean {
 	);
 }
 
+function clientSessionCapabilities(client: DaemonSocketClient, activeSessionId: string): Set<DaemonClientCapability> {
+	return client.capabilitiesByActiveSessionId?.get(activeSessionId) ?? client.capabilities;
+}
+
+function clientSessionSupportsExtensionUi(client: DaemonSocketClient, activeSessionId: string): boolean {
+	return client.capabilitiesByActiveSessionId?.get(activeSessionId)?.has("extension_ui") ?? client.supportsExtensionUi;
+}
+
 function normalizeCapabilities(
 	capabilities: readonly DaemonClientCapability[] | undefined,
 	supportsExtensionUi: boolean | undefined,
@@ -757,6 +765,7 @@ export class DaemonSupervisor {
 	private readonly settingsManager: SettingsManager;
 	private readonly rlmCapacity: DaemonRlmCapacityCoordinator;
 	private readonly pendingRlmCapacity = new Set<ResidentWorker>();
+	private readonly rlmCapacityAdmissions = new Set<{ owner: string; reservationId: string; released: boolean }>();
 	private readonly releasedDuringCapacityRecovery = new Map<ResidentWorker, Set<string>>();
 	private rosterStore?: AgentRoster;
 	private readonly pendingRosterChanged = new Set<string>();
@@ -1537,6 +1546,7 @@ export class DaemonSupervisor {
 			this.cancelWaitingPromptAdmissionsForClient(client);
 			for (const activeSessionId of [...client.attachedActiveSessionIds]) {
 				client.attachedActiveSessionIds.delete(activeSessionId);
+				client.capabilitiesByActiveSessionId?.delete(activeSessionId);
 				void this.syncWorkerExtensionUi(activeSessionId);
 				void this.evictEmptySessionOnLastDetach(activeSessionId);
 			}
@@ -2107,6 +2117,11 @@ export class DaemonSupervisor {
 		if (operation.op === "release") {
 			if (typeof operation.reservationId !== "string" || !operation.reservationId)
 				throw new Error("Invalid RLM reservation id");
+			for (const admission of this.rlmCapacityAdmissions) {
+				if (admission.owner === owner && admission.reservationId === operation.reservationId) {
+					admission.released = true;
+				}
+			}
 			this.rlmCapacity.release(owner, operation.reservationId);
 			if (this.pendingRlmCapacity.has(worker)) {
 				let released = this.releasedDuringCapacityRecovery.get(worker);
@@ -2127,43 +2142,52 @@ export class DaemonSupervisor {
 		) {
 			throw new Error("Invalid RLM capacity origin");
 		}
-		const family = await this.rlmCapacityFamily(operation.sessionFile, owner, operation.sessionId);
-		await this.assertServingCurrentOwnership(true);
-		if (this.rlmCapacityOwner(worker) !== owner || worker.descriptor.authenticationToken !== command.workerToken) {
-			throw new Error("RLM capacity worker incarnation changed");
+		// A disconnected reserve can still be resolving its family when cleanup releases it.
+		const admission =
+			operation.op === "reserve" ? { owner, reservationId: operation.reservationId, released: false } : undefined;
+		if (admission) this.rlmCapacityAdmissions.add(admission);
+		try {
+			const family = await this.rlmCapacityFamily(operation.sessionFile, owner, operation.sessionId);
+			await this.assertServingCurrentOwnership(true);
+			if (this.rlmCapacityOwner(worker) !== owner || worker.descriptor.authenticationToken !== command.workerToken) {
+				throw new Error("RLM capacity worker incarnation changed");
+			}
+			if (operation.op === "status") return success(command.id, command.type, this.rlmCapacity.getStatus(family));
+			if (this.shuttingDown || this.updateRestartPhase !== undefined || worker.descriptor.stopRequestedAt) {
+				throw new Error("RLM capacity admission is closed while the worker or daemon is stopping");
+			}
+			if (operation.op === "set") {
+				return success(
+					command.id,
+					command.type,
+					await this.rlmCapacity.setMaxSubagents(family, operation.maxSubagents),
+				);
+			}
+			if (
+				typeof operation.reservationId !== "string" ||
+				!operation.reservationId ||
+				(operation.residentRoot !== undefined && operation.residentRoot !== true)
+			)
+				throw new Error("Invalid RLM reservation");
+			if (operation.residentRoot && this.isRlmMainRoot(operation.sessionFile, family)) {
+				return success(command.id, command.type, this.rlmCapacity.getStatus(family));
+			}
+			await this.assertRlmCapacityKnown(family);
+			await this.assertServingCurrentOwnership();
+			if (
+				this.updateRestartPhase !== undefined ||
+				worker.descriptor.stopRequestedAt ||
+				this.rlmCapacityOwner(worker) !== owner ||
+				this.workers.get(worker.descriptor.workerId) !== worker ||
+				this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId) !== "current"
+			) {
+				throw new Error("RLM capacity admission changed while resolving its family");
+			}
+			if (admission?.released) throw new Error("RLM capacity reservation was released during admission");
+			return success(command.id, command.type, this.rlmCapacity.reserve(owner, operation.reservationId, family));
+		} finally {
+			if (admission) this.rlmCapacityAdmissions.delete(admission);
 		}
-		if (operation.op === "status") return success(command.id, command.type, this.rlmCapacity.getStatus(family));
-		if (this.shuttingDown || this.updateRestartPhase !== undefined || worker.descriptor.stopRequestedAt) {
-			throw new Error("RLM capacity admission is closed while the worker or daemon is stopping");
-		}
-		if (operation.op === "set") {
-			return success(
-				command.id,
-				command.type,
-				await this.rlmCapacity.setMaxSubagents(family, operation.maxSubagents),
-			);
-		}
-		if (
-			typeof operation.reservationId !== "string" ||
-			!operation.reservationId ||
-			(operation.residentRoot !== undefined && operation.residentRoot !== true)
-		)
-			throw new Error("Invalid RLM reservation");
-		if (operation.residentRoot && this.isRlmMainRoot(operation.sessionFile, family)) {
-			return success(command.id, command.type, this.rlmCapacity.getStatus(family));
-		}
-		await this.assertRlmCapacityKnown(family);
-		await this.assertServingCurrentOwnership();
-		if (
-			this.updateRestartPhase !== undefined ||
-			worker.descriptor.stopRequestedAt ||
-			this.rlmCapacityOwner(worker) !== owner ||
-			this.workers.get(worker.descriptor.workerId) !== worker ||
-			this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId) !== "current"
-		) {
-			throw new Error("RLM capacity admission changed while resolving its family");
-		}
-		return success(command.id, command.type, this.rlmCapacity.reserve(owner, operation.reservationId, family));
 	}
 
 	private async handleCommand(
@@ -2299,7 +2323,7 @@ export class DaemonSupervisor {
 			}
 			case "attach": {
 				const attached = await this.attachClient(client, command);
-				if (client.capabilities.has("chunked_snapshot")) {
+				if (attached.result.client.capabilities.includes("chunked_snapshot")) {
 					const transcript = attached.transcript;
 					if (!transcript) {
 						throw new Error("Session worker did not provide a snapshot transcript");
@@ -2351,7 +2375,7 @@ export class DaemonSupervisor {
 					detachingSessions?.delete(command.activeSessionId);
 					detachingSessions?.delete(command.targetActiveSessionId);
 					detachingSessions?.delete(targetActiveSessionId);
-					if (client.capabilities.has("chunked_snapshot")) {
+					if (attached.result.client.capabilities.includes("chunked_snapshot")) {
 						const transcript =
 							attached.transcript ?? this.getOrCreateTranscriptCache(attached.worker, attached.result);
 						releaseTranscript = attached.releaseTranscript;
@@ -3378,6 +3402,7 @@ export class DaemonSupervisor {
 			worker.intentionalStop = true;
 			await this.recoverUncertainWorkerOperations(worker);
 			this.invalidateWorkerSessionInputPauses(worker, "Session worker stopped while input was paused");
+			this.releaseWorkerRlmCapacity(worker);
 			this.workers.delete(worker.descriptor.workerId);
 			this.flipWorkerRosterEntriesInactive(worker);
 			this.deleteWorkerDescriptor(worker);
@@ -3838,7 +3863,9 @@ export class DaemonSupervisor {
 			throw new Error("Session worker is not connected");
 		}
 		const supportsExtensionUi = [...this.clients].some(
-			(client) => client.attachedActiveSessionIds.has(activeSessionId) && client.supportsExtensionUi,
+			(client) =>
+				client.attachedActiveSessionIds.has(activeSessionId) &&
+				clientSessionSupportsExtensionUi(client, activeSessionId),
 		);
 		const response = await worker.client.requestWorker({
 			type: "worker_subscribe",
@@ -5615,19 +5642,18 @@ export class DaemonSupervisor {
 		if (command.clientId) {
 			client.id = command.clientId;
 		}
-		client.capabilities = normalizeCapabilities(command.capabilities, command.supportsExtensionUi);
-		client.supportsExtensionUi = client.capabilities.has("extension_ui");
+		const capabilities = normalizeCapabilities(command.capabilities, command.supportsExtensionUi);
 
 		let result = match.worker.snapshotCache.get(activeSessionId);
 		if (
 			result &&
-			!client.capabilities.has("chunked_snapshot") &&
+			!capabilities.has("chunked_snapshot") &&
 			result.snapshot.messages.length < result.snapshot.summary.messageCount
 		) {
 			result = undefined;
 		}
 		if (!result) {
-			const snapshotLoadKey = `${activeSessionId}:${client.capabilities.has("chunked_snapshot") ? "chunked" : "full"}`;
+			const snapshotLoadKey = `${activeSessionId}:${capabilities.has("chunked_snapshot") ? "chunked" : "full"}`;
 			let retryInvalidatedLoad = true;
 			while (!result) {
 				let loading = match.worker.snapshotLoads.get(snapshotLoadKey);
@@ -5640,7 +5666,7 @@ export class DaemonSupervisor {
 						const response = await workerClient.request({
 							type: "attach",
 							activeSessionId,
-							capabilities: client.capabilities.has("chunked_snapshot")
+							capabilities: capabilities.has("chunked_snapshot")
 								? ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"]
 								: ["attach_snapshot", "event_sequence", "slim_attach"],
 							supportsExtensionUi: false,
@@ -5697,7 +5723,7 @@ export class DaemonSupervisor {
 		this.requireAvailableWorkerClient(match.worker);
 		const wasAttached = client.attachedActiveSessionIds.has(activeSessionId);
 		let transcript: SnapshotTranscriptCache | undefined;
-		if (client.capabilities.has("chunked_snapshot")) {
+		if (capabilities.has("chunked_snapshot")) {
 			while (true) {
 				const validation = this.currentSnapshotGeneration(match.worker, activeSessionId)?.validation;
 				if (validation) {
@@ -5728,7 +5754,7 @@ export class DaemonSupervisor {
 				...result,
 				state: result.state ? publicSummary : undefined,
 				snapshot: { ...result.snapshot, summary: publicSummary },
-				client: { id: client.id, capabilities: [...client.capabilities] },
+				client: { id: client.id, capabilities: [...capabilities] },
 			};
 			if (publicResult.state && publicResult.messages) {
 				this.write(client, {
@@ -5741,6 +5767,10 @@ export class DaemonSupervisor {
 					lastEventSequence: publicResult.lastEventSequence,
 				});
 			}
+			client.capabilitiesByActiveSessionId ??= new Map();
+			client.capabilitiesByActiveSessionId.set(activeSessionId, capabilities);
+			client.capabilities = capabilities;
+			client.supportsExtensionUi = capabilities.has("extension_ui");
 			void this.syncWorkerExtensionUi(activeSessionId);
 			const detachingSessions = this.detachingInputPauseSessions?.get(client);
 			detachingSessions?.delete(command.activeSessionId);
@@ -6027,6 +6057,7 @@ export class DaemonSupervisor {
 			if (!client.attachedActiveSessionIds.delete(resolvedId)) {
 				continue;
 			}
+			client.capabilitiesByActiveSessionId?.delete(resolvedId);
 			client.catchupActiveSessionIds?.delete(resolvedId);
 			client.catchupPurposes?.delete(resolvedId);
 			this.write(client, { type: "session_detached", activeSessionId: resolvedId });
@@ -6445,10 +6476,13 @@ export class DaemonSupervisor {
 			if (!client.attachedActiveSessionIds.has(activeSessionId)) {
 				continue;
 			}
-			if (replacementSnapshotFollows && !client.capabilities.has("chunked_snapshot")) {
+			if (
+				replacementSnapshotFollows &&
+				!clientSessionCapabilities(client, activeSessionId).has("chunked_snapshot")
+			) {
 				continue;
 			}
-			if (outboundType === "extension_ui_request" && !client.supportsExtensionUi) {
+			if (outboundType === "extension_ui_request" && !clientSessionSupportsExtensionUi(client, activeSessionId)) {
 				continue;
 			}
 			if (client.snapshotActiveSessionIds?.has(activeSessionId)) {
@@ -6569,11 +6603,11 @@ export class DaemonSupervisor {
 				const attached = await this.attachClient(client, {
 					type: "attach",
 					activeSessionId,
-					capabilities: [...client.capabilities],
-					supportsExtensionUi: client.supportsExtensionUi,
+					capabilities: [...clientSessionCapabilities(client, activeSessionId)],
+					supportsExtensionUi: clientSessionSupportsExtensionUi(client, activeSessionId),
 				});
 				releaseTranscript = attached.releaseTranscript;
-				if (client.capabilities.has("chunked_snapshot")) {
+				if (attached.result.client.capabilities.includes("chunked_snapshot")) {
 					const transcript = attached.transcript;
 					if (!transcript) {
 						throw new Error("Session worker did not provide a snapshot transcript");
@@ -7399,6 +7433,7 @@ export class DaemonSupervisor {
 		});
 		for (const client of this.clients) {
 			client.attachedActiveSessionIds.clear();
+			client.capabilitiesByActiveSessionId?.clear();
 			await this.runCleanupStep(`daemon client input ${client.id}`, () => client.detachInput());
 			await this.runCleanupStep(`daemon client socket ${client.id}`, () => {
 				client.socket.destroy();

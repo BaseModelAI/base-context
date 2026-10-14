@@ -586,7 +586,7 @@ export async function recoverCapturedHistory(
 			? structuredClone(saved)
 			: {
 					source: { ...view.source },
-					excludedToolCall: continuable && activeToolCall ? { ...activeToolCall } : undefined,
+					excludedToolCall: searching && continuable && activeToolCall ? { ...activeToolCall } : undefined,
 					operation: { ...operation, cursor: undefined, maxBytes: undefined },
 					after: 0,
 					field: 0,
@@ -601,6 +601,7 @@ export async function recoverCapturedHistory(
 		let reason: string | undefined;
 		let exhausted = false;
 		let windows = 0;
+		let readSelected = false;
 		const cursorId = supplied.cursor ?? randomUUID();
 		const progress = (complete: boolean): NativeRecoveryResult => ({
 			...outcome(
@@ -880,6 +881,7 @@ export async function recoverCapturedHistory(
 					}
 					if (selected) {
 						if (!searching) {
+							readSelected = true;
 							if (!readText) {
 								readStart = startByte;
 								readLine = recordLine;
@@ -966,7 +968,9 @@ export async function recoverCapturedHistory(
 		signal?.throwIfAborted();
 		if (!exhausted && continuable && cursors) cursors.save(state, version, cursorId);
 		else if (supplied.cursor && exhausted) cursors?.delete(supplied.cursor);
-		if (!searching && !exhausted && records.length === 0)
+		const skippedSource =
+			!readSelected && (state.field > (saved?.field ?? 0) || state.byte > (saved?.byte ?? operation.startByte ?? 0));
+		if (!searching && !exhausted && records.length === 0 && !(cursors && skippedSource))
 			return outcome(i, "budget_refused", "unknown", [], reason ?? "operation_budget");
 		return progress(exhausted);
 	}

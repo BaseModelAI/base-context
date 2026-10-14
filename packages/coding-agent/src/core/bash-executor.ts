@@ -6,14 +6,10 @@
  * - Direct calls from modes that need bash execution
  */
 
-import { randomBytes } from "node:crypto";
-import { createWriteStream, type WriteStream } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import stripAnsi from "strip-ansi";
 import { sanitizeBinaryOutput } from "../utils/shell.js";
 import type { BashOperations } from "./tools/bash.js";
-import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.js";
+import { OutputAccumulator } from "./tools/output-accumulator.js";
 export interface BashExecutorOptions {
 	/** Callback for streaming output chunks (already sanitized) */
 	onChunk?: (chunk: string) => void;
@@ -43,95 +39,40 @@ export async function executeBashWithOperations(
 	operations: BashOperations,
 	options?: BashExecutorOptions,
 ): Promise<BashResult> {
-	const outputChunks: string[] = [];
-	let outputBytes = 0;
-	const maxOutputBytes = DEFAULT_MAX_BYTES * 2;
-
-	let tempFilePath: string | undefined;
-	let tempFileStream: WriteStream | undefined;
-	let totalBytes = 0;
-
-	const ensureTempFile = () => {
-		if (tempFilePath) {
-			return;
-		}
-		const id = randomBytes(8).toString("hex");
-		tempFilePath = join(tmpdir(), `pi-bash-${id}.log`);
-		tempFileStream = createWriteStream(tempFilePath);
-		for (const chunk of outputChunks) {
-			tempFileStream.write(chunk);
-		}
-	};
-
+	const output = new OutputAccumulator({ tempFilePrefix: "pi-bash" });
 	const decoder = new TextDecoder();
-
-	const onData = (data: Buffer) => {
-		totalBytes += data.length;
-		const text = sanitizeBinaryOutput(stripAnsi(decoder.decode(data, { stream: true }))).replace(/\r/g, "");
-		if (totalBytes > DEFAULT_MAX_BYTES) {
-			ensureTempFile();
-		}
-
-		if (tempFileStream) {
-			tempFileStream.write(text);
-		}
-		outputChunks.push(text);
-		outputBytes += text.length;
-		while (outputBytes > maxOutputBytes && outputChunks.length > 1) {
-			const removed = outputChunks.shift()!;
-			outputBytes -= removed.length;
-		}
-		if (options?.onChunk) {
-			options.onChunk(text);
-		}
+	const appendText = (decoded: string) => {
+		const text = sanitizeBinaryOutput(stripAnsi(decoded)).replace(/\r/g, "");
+		if (!text) return;
+		output.append(Buffer.from(text));
+		options?.onChunk?.(text);
 	};
 
 	try {
-		const result = await operations.exec(command, cwd, {
-			onData,
-			signal: options?.signal,
-		});
+		let exitCode: number | null | undefined;
+		try {
+			const result = await operations.exec(command, cwd, {
+				onData: (data) => appendText(decoder.decode(data, { stream: true })),
+				signal: options?.signal,
+			});
+			exitCode = result.exitCode;
+		} catch (error) {
+			if (!options?.signal?.aborted) throw error;
+		}
 
-		const fullOutput = outputChunks.join("");
-		const truncationResult = truncateTail(fullOutput);
-		if (truncationResult.truncated) {
-			ensureTempFile();
-		}
-		if (tempFileStream) {
-			tempFileStream.end();
-		}
+		appendText(decoder.decode());
+		output.finish();
+		const snapshot = output.snapshot({ persistIfTruncated: true });
 		const cancelled = options?.signal?.aborted ?? false;
-
 		return {
-			output: truncationResult.truncated ? truncationResult.content : fullOutput,
-			exitCode: cancelled ? undefined : (result.exitCode ?? undefined),
+			output: snapshot.content,
+			exitCode: cancelled ? undefined : (exitCode ?? undefined),
 			cancelled,
-			truncated: truncationResult.truncated,
-			fullOutputPath: tempFilePath,
+			truncated: snapshot.truncation.truncated,
+			fullOutputPath: snapshot.fullOutputPath,
 		};
-	} catch (err) {
-		if (options?.signal?.aborted) {
-			const fullOutput = outputChunks.join("");
-			const truncationResult = truncateTail(fullOutput);
-			if (truncationResult.truncated) {
-				ensureTempFile();
-			}
-			if (tempFileStream) {
-				tempFileStream.end();
-			}
-			return {
-				output: truncationResult.truncated ? truncationResult.content : fullOutput,
-				exitCode: undefined,
-				cancelled: true,
-				truncated: truncationResult.truncated,
-				fullOutputPath: tempFilePath,
-			};
-		}
-
-		if (tempFileStream) {
-			tempFileStream.end();
-		}
-
-		throw err;
+	} finally {
+		output.finish();
+		await output.closeTempFile();
 	}
 }

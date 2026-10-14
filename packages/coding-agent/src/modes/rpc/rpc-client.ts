@@ -97,6 +97,7 @@ export class RpcClient {
 		new Map();
 	private requestId = 0;
 	private stderr = "";
+	private readonly completionWaiters = new Set<(error: Error) => void>();
 
 	constructor(private options: RpcClientOptions = {}) {}
 
@@ -135,12 +136,15 @@ export class RpcClient {
 			this.stderr += data.toString();
 			process.stderr.write(data);
 		});
-		child.once("error", (error) => {
+		child.stdin?.on("error", (error) => {
 			if (this.process === child) this.rejectPendingRequests(error);
+		});
+		child.once("error", (error) => {
+			if (this.process === child) this.rejectPendingOperations(error);
 		});
 		// Drain final stdout/stderr before rejecting requests that received no response.
 		child.once("close", () => {
-			if (this.process === child) this.rejectPendingRequests(this.processExitError(child));
+			if (this.process === child) this.rejectPendingOperations(this.processExitError(child));
 		});
 
 		// Set up strict JSONL reader for stdout.
@@ -181,11 +185,10 @@ export class RpcClient {
 		this.stopReadingStdout?.();
 		this.stopReadingStdout = null;
 
-		if (child.exitCode === null && child.signalCode === null) {
+		if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
 			await new Promise<void>((resolve) => {
 				const timeout = setTimeout(() => {
 					child.kill("SIGKILL");
-					resolve();
 				}, 1000);
 
 				child.once("exit", () => {
@@ -198,7 +201,7 @@ export class RpcClient {
 
 		if (this.process === child) {
 			this.process = null;
-			this.rejectPendingRequests(new Error("RPC client stopped"));
+			this.rejectPendingOperations(new Error("RPC client stopped"));
 		}
 	}
 
@@ -589,23 +592,29 @@ export class RpcClient {
 	 */
 	waitForIdle(timeout = 60000): Promise<void> {
 		return new Promise((resolve, reject) => {
+			const fail = (error: Error) => {
+				cleanup();
+				reject(error);
+			};
 			const timer = setTimeout(() => {
-				unsubscribe();
-				reject(new Error(`Timeout waiting for agent to become idle. Stderr: ${this.stderr}`));
+				fail(new Error(`Timeout waiting for agent to become idle. Stderr: ${this.stderr}`));
 			}, timeout);
 
 			const unsubscribe = this.onEvent((event) => {
 				const error = promptCompletionError(event);
 				if (error !== undefined) {
-					clearTimeout(timer);
-					unsubscribe();
-					reject(new Error(error));
+					fail(new Error(error));
 				} else if (event.type === "agent_end") {
-					clearTimeout(timer);
-					unsubscribe();
+					cleanup();
 					resolve();
 				}
 			});
+			const cleanup = () => {
+				clearTimeout(timer);
+				unsubscribe();
+				this.completionWaiters.delete(fail);
+			};
+			this.completionWaiters.add(fail);
 		});
 	}
 
@@ -619,6 +628,10 @@ export class RpcClient {
 	private createEventCollection(timeout: number): { result: Promise<AgentEvent[]>; cancel: () => void } {
 		let cancel = () => {};
 		const result = new Promise<AgentEvent[]>((resolve, reject) => {
+			const fail = (error: Error) => {
+				cancel();
+				reject(error);
+			};
 			const events: AgentEvent[] = [];
 			const timer = setTimeout(() => {
 				cancel();
@@ -641,8 +654,10 @@ export class RpcClient {
 			cancel = () => {
 				clearTimeout(timer);
 				unsubscribe();
+				this.completionWaiters.delete(fail);
 				cancel = () => {};
 			};
+			this.completionWaiters.add(fail);
 		});
 		return { result, cancel: () => cancel() };
 	}
@@ -675,6 +690,12 @@ export class RpcClient {
 	private rejectPendingRequests(error: Error): void {
 		for (const pending of this.pendingRequests.values()) pending.reject(error);
 		this.pendingRequests.clear();
+	}
+
+	private rejectPendingOperations(error: Error): void {
+		this.rejectPendingRequests(error);
+		for (const fail of this.completionWaiters) fail(error);
+		this.completionWaiters.clear();
 	}
 
 	private handleLine(line: string): void {
@@ -719,6 +740,9 @@ export class RpcClient {
 		}
 		if (child.exitCode !== null || child.signalCode !== null) {
 			throw this.processExitError(child);
+		}
+		if (child.stdin.destroyed) {
+			throw new Error("RPC process input is closed");
 		}
 
 		const id = `req_${++this.requestId}`;

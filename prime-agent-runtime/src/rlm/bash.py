@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import json
+import logging
 import os
 import secrets
 import selectors
@@ -585,7 +586,10 @@ class BashHandle:
             callbacks = self._callbacks
             self._callbacks = []
         for callback in callbacks:
-            callback()
+            try:
+                callback()
+            except Exception:
+                logging.getLogger(__name__).exception("Bash completion callback failed")
 
     def _add_done_callback(self, callback: Callable[[], None]) -> None:
         with self._callback_lock:

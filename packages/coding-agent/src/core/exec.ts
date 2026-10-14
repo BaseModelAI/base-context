@@ -3,6 +3,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { waitForChildProcess } from "../utils/child-process.js";
 
 /**
@@ -69,6 +70,8 @@ export async function execCommand(
 
 		let stdout = "";
 		let stderr = "";
+		const stdoutDecoder = new StringDecoder("utf8");
+		const stderrDecoder = new StringDecoder("utf8");
 		let killed = false;
 		let timeoutId: NodeJS.Timeout | undefined;
 		let forceKillTimeoutId: NodeJS.Timeout | undefined;
@@ -100,15 +103,17 @@ export async function execCommand(
 			}, options.timeout);
 		}
 
-		proc.stdout?.on("data", (data) => {
-			stdout += data.toString();
+		proc.stdout?.on("data", (data: Buffer) => {
+			stdout += stdoutDecoder.write(data);
 		});
 
-		proc.stderr?.on("data", (data) => {
-			stderr += data.toString();
+		proc.stderr?.on("data", (data: Buffer) => {
+			stderr += stderrDecoder.write(data);
 		});
 
 		const cleanup = () => {
+			stdout += stdoutDecoder.end();
+			stderr += stderrDecoder.end();
 			if (timeoutId) clearTimeout(timeoutId);
 			if (forceKillTimeoutId) clearTimeout(forceKillTimeoutId);
 			if (options?.signal) {

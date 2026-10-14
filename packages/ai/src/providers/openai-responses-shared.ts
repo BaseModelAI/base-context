@@ -642,6 +642,7 @@ export async function processResponsesStream<TApi extends Api>(
 	let currentItem: ResponseReasoningItem | ResponseOutputMessage | ResponseFunctionToolCall | null = null;
 	let currentBlock: ThinkingContent | TextContent | (ToolCall & { partialJson: string }) | null = null;
 	let currentContentIndex = -1;
+	let sawTerminalResponse = false;
 	const slots = new Map<
 		number,
 		{
@@ -860,6 +861,7 @@ export async function processResponsesStream<TApi extends Api>(
 				stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
 			}
 		} else if (event.type === "response.completed" || event.type === "response.incomplete") {
+			sawTerminalResponse = true;
 			const response = event.response;
 			if (response?.id) {
 				output.responseId = response.id;
@@ -912,6 +914,9 @@ export async function processResponsesStream<TApi extends Api>(
 				providerErrorType,
 			});
 		}
+	}
+	if (!sawTerminalResponse) {
+		throw new StreamFailureError("Response stream ended before response.completed", { kind: "transport" });
 	}
 }
 
