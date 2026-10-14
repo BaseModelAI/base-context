@@ -1,4 +1,0 @@
-- Added optional task contracts that keep requirements, assumptions, objectives, delivery paths, ownership, and boundary cases distinct through delegation and compaction.
-- Added structured result outcomes with decisive facts, conflicts, and explicit integration readiness.
-- Added dependency-complete delivery staging and bounded exact objective search helpers to the Python runtime.
-- Added immutable command execution context with explicit working directories and caller-declared runtime modes.
