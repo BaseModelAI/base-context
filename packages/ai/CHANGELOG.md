@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.9] - 2026-10-14
+
+- Fixed Codex connection leaks during overlapping handshakes and requests starting after cancellation.
+- Fixed incomplete OpenAI Responses streams being reported as successful completions.
+- Fixed incomplete Chat Completions streams being reported as successful responses.
+- Fixed cancellation and request-body measurement for SDK transports that send native Request objects.
+- Fixed incomplete Mistral streams being reported as successful responses.
+- Fixed Google and Vertex requests being sent after cancellation during payload preparation.
+- Fixed Google and Vertex terminal errors being replaced by successful tool-call results.
+
 ## [1.1.4] - 2026-10-12
 
 - Fixed recovery after Codex WebSocket connections closed before a response completed.

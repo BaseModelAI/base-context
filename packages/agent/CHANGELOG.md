@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.1.9] - 2026-10-14
+
+- Fixed successful retries retaining the previous attempt's error status.
+
 ## [1.1.8] - 2026-10-13
 
 - Fixed tool completion returning before accepted progress updates settled after a listener failure, while preserving the actual execution outcome.
