@@ -29,7 +29,7 @@ base-context
 
 **Bring your existing provider account.** Choose `/login`, then `/model` and `/effort`. Have ChatGPT with Codex access? Choose **OpenAI Codex** in `/login`—no separate API key needed. Other supported subscriptions and API keys are available through their provider routes. [Provider setup](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/providers.md).
 
-This page describes **1.1.3**; install commands use the latest public release. [What's new](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/release-notes-1.1.3.md).
+Install commands use the latest public release. See the [changelog](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/CHANGELOG.md) for version-specific changes.
 
 <details>
 <summary>npm, Windows, and source installations</summary>
