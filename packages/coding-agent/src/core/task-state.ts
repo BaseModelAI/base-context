@@ -1,6 +1,7 @@
 import { GOAL_STATE_CUSTOM_TYPE, isPersistedGoalState } from "./goals.js";
 import type { JournalFrameRetention, NativeEntryQualification } from "./journal-frame.js";
 import type { NativeEntryOrigin } from "./session-entry-origin.js";
+import { normalizeTaskContract } from "./task-contract.js";
 
 export const TASK_STATE_CUSTOM_TYPE = "task_state";
 export const TASK_STATE_SCHEMA = "base-context.task-state/v1";
@@ -45,6 +46,7 @@ export interface TaskStateSource {
 		parentId: string | null;
 		type: string;
 		customType?: string;
+		content?: unknown;
 		data?: unknown;
 		details?: unknown;
 		message?: unknown;
@@ -360,6 +362,32 @@ function nativeGoalOrigin(
  * Relations are supplied claims, not permission to retire authoritative requirements.
  * Original text remains addressable through source even when no structured item is decoded.
  */
+function* delegatedTaskContract(source: TaskStateSource): Generator<TaskStateProjection> {
+	const { entry } = source;
+	if (entry.type !== "custom_message" || entry.customType !== "agent_message") return;
+	const details = record(entry.details);
+	if (
+		details?.fromRelationship !== "parent" ||
+		details.taskContract === undefined ||
+		typeof entry.content !== "string"
+	)
+		return;
+	try {
+		normalizeTaskContract(details.taskContract);
+	} catch {
+		return;
+	}
+	yield {
+		source: sourceRef(source, "/content"),
+		kind: "observed_fact",
+		text: entry.content,
+		operation: "observe",
+		relations: [],
+		authority: "assistant-public",
+		attribution: "descriptive",
+	};
+}
+
 export function* projectTaskStateSource(source: TaskStateSource): Generator<TaskStateProjection> {
 	if (source.retention !== undefined && source.retention !== "retained-import")
 		throw new Error("Unsupported task source retention");
@@ -374,6 +402,7 @@ export function* projectTaskStateSource(source: TaskStateSource): Generator<Task
 	const qualified = source.qualification === "native-admission" && !retained;
 	const { entry } = source;
 	const data = record(entry.data);
+	yield* delegatedTaskContract(source);
 	if (entry.type === "message") {
 		yield* nativeInput(source);
 		return;

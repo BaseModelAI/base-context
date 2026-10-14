@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .bash import BashHandle, BashResult, bash
+from . import workflow
+from .bash import BashExecutionContext, BashHandle, BashResult, bash
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 
 @dataclass(frozen=True)
@@ -109,9 +110,13 @@ async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
     ``model`` selects a child with an exact ``provider/model`` selector.
     ``thinking`` sets the child reasoning level (e.g. 'off', 'low', 'medium', 'high');
     defaults to the parent level; levels invalid for the resolved model fail the spawn.
+    ``task_contract`` is an optional structured brief, validated by the host before
+    admission and kept distinct from native user instructions.
     """
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
+    if "task_contract" in kwargs and not isinstance(kwargs["task_contract"], dict):
+        raise TypeError("task_contract must be a dict")
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     return _spawn_handle_from_payload(payload)
 
@@ -250,6 +255,7 @@ _harness_state = _HarnessProxy()
 
 class _RLMCallable:
     harness = _harness_state
+    workflow = workflow
     get_harness_state = staticmethod(get_harness_state)
     prime_context = staticmethod(prime_context)
 
@@ -281,6 +287,7 @@ class _CallableModule(types.ModuleType):
 sys.modules[__name__].__class__ = _CallableModule
 
 __all__ = [
+    "BashExecutionContext",
     "BashHandle",
     "BashResult",
     "HarnessEntry",
@@ -304,6 +311,7 @@ __all__ = [
     "prime_context",
     "rlm",
     "run",
+    "workflow",
 ]
 
 # Lazily re-export the MCP base class. Kept lazy so `import rlm` never requires

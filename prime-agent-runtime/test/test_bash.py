@@ -32,6 +32,7 @@ def _win_spawn(procs=None, resume=True):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
+            start_new_session=True,
         )
         proc.resume = mock.Mock(return_value=resume)
         proc.close = mock.Mock()
@@ -45,6 +46,25 @@ def _win_spawn(procs=None, resume=True):
 
 
 class BashTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncTearDown(self):
+        with bash_module._live_lock:
+            handles = list(bash_module._live_handles)
+        for handle in handles:
+            bash_module._signal_group(handle._pid, signal.SIGKILL)
+        await self._settle_handles(handles)
+
+    async def _settle_handles(self, handles):
+        for handle in handles:
+            self.assertTrue(await handle._await_group_death(5))
+        deadline = time.monotonic() + 5
+        while True:
+            with bash_module._live_lock:
+                pending = [handle for handle in handles if handle in bash_module._live_handles]
+            if not pending:
+                return
+            self.assertLess(time.monotonic(), deadline, f"test handles did not settle: {pending}")
+            await asyncio.sleep(0.01)
+
     async def test_await_returns_result(self):
         result = await bash("echo hi")
         self.assertEqual(result.exit_code, 0)
@@ -76,7 +96,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         dummies = [os.open(os.devnull, os.O_RDONLY) for _ in range(30)]
         self.addCleanup(lambda: [os.close(fd) for fd in dummies])
         if os.path.exists("/bin/dash"):
-            with mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/dash"}):
+            with mock.patch.dict(os.environ, {"BASE_CONTEXT_BASH_SHELL": "/bin/dash"}):
                 result = await bash("echo ok")
             self.assertEqual(result.exit_code, 0)
             self.assertIn("ok", result.output)
@@ -120,15 +140,16 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "PRIME_AGENT_BASH_COMMAND_PREFIX": "echo prefixed",
-                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
-                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+                    "BASE_CONTEXT_BASH_COMMAND_PREFIX": "echo prefixed",
+                    "BASE_CONTEXT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                    "BASE_CONTEXT_KERNEL_OWNER_PID": str(os.getpid()),
                 },
             ):
                 handle = bash('echo "$NO_COLOR $TERM"')
                 result = await handle
                 # The inactive record lands slightly after finalize, once the group exits.
                 records = await _poll_journal(journal, count=2)
+                await self._settle_handles([handle])
             self.assertEqual(result.exit_code, 0)
             lines = result.output.splitlines()
             self.assertEqual(lines[0], "prefixed")
@@ -147,8 +168,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
-                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+                    "BASE_CONTEXT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                    "BASE_CONTEXT_KERNEL_OWNER_PID": str(os.getpid()),
                 },
             ):
                 handle = bash("echo fg; sleep 30 &")
@@ -161,6 +182,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(records[-1]["active"])
                 handle.kill(signal.SIGKILL)
                 records = await _poll_journal(journal, count=2)
+                await self._settle_handles([handle])
             self.assertFalse(records[-1]["active"])
 
     async def test_early_shell_exit_returns_and_kills_group(self):
@@ -176,8 +198,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
-                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+                    "BASE_CONTEXT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                    "BASE_CONTEXT_KERNEL_OWNER_PID": str(os.getpid()),
                 },
             ):
                 handle = bash("sh -c 'trap \"\" TERM; echo ready; sleep 30' &")
@@ -188,6 +210,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                     await asyncio.sleep(0.05)
                 handle.kill(signal.SIGTERM)
                 records = await _poll_journal(journal, count=2, timeout=10)
+                await self._settle_handles([handle])
             self.assertFalse(records[-1]["active"])
             await _poll_group_dead(handle.pid)
 
@@ -212,12 +235,13 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 os.kill(handle.pid, signal.SIGTERM)
                 # _watch must fully finish its finalize decision while _report is held.
                 for _ in range(200):
-                    with bash_module._live_lock:
-                        if handle not in bash_module._live_handles:
-                            break
+                    if handle._watch_settled:
+                        break
                     await asyncio.sleep(0.05)
                 else:
                     self.fail("watcher did not complete while reporter was held")
+                with bash_module._live_lock:
+                    self.assertIn(handle, bash_module._live_handles)
             finally:
                 release.set()
             result = await asyncio.wait_for(handle, timeout=5)
@@ -461,8 +485,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             pids: list[int] = []
             original_init = bash_module.BashHandle.__init__
 
-            def capturing_init(handle_self, command):
-                original_init(handle_self, command)
+            def capturing_init(handle_self, command, **kwargs):
+                original_init(handle_self, command, **kwargs)
                 pids.append(handle_self._pid)
 
             async def run_oneshot():
@@ -489,8 +513,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             pids: list[int] = []
             original_init = bash_module.BashHandle.__init__
 
-            def capturing_init(handle_self, command):
-                original_init(handle_self, command)
+            def capturing_init(handle_self, command, **kwargs):
+                original_init(handle_self, command, **kwargs)
                 pids.append(handle_self._pid)
 
             async def run_oneshot():
@@ -568,8 +592,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         pids: list[int] = []
         original_init = bash_module.BashHandle.__init__
 
-        def capturing_init(handle_self, command):
-            original_init(handle_self, command)
+        def capturing_init(handle_self, command, **kwargs):
+            original_init(handle_self, command, **kwargs)
             pids.append(handle_self._pid)
 
         async def run_oneshot():
@@ -596,7 +620,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             with mock.patch.object(
                 bash_module.shutil, "which", return_value=r"C:\evil\bash.exe"
             ) as which:
-                with self.assertRaisesRegex(RuntimeError, "PRIME_AGENT_BASH_SHELL"):
+                with self.assertRaisesRegex(RuntimeError, "BASE_CONTEXT_BASH_SHELL"):
                     bash_module._shell()
                 which.assert_not_called()
 
@@ -687,11 +711,12 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("output-before-shell-kill", result.output)
 
     async def test_relative_bash_shell_override_rejected(self):
-        with mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "bash"}):
+        with mock.patch.dict(os.environ, {"BASE_CONTEXT_BASH_SHELL": "bash"}):
             with self.assertRaises(ValueError):
                 bash("echo hi")
 
     async def test_windows_journal_writes_only_enriched_record(self):
+        self.enterContext(mock.patch.object(bash_module._winjob, "is_empty", return_value=True))
         # No pid-only pre-record on Windows: the kill-on-close job replaces it
         # (a kernel death reaps the tree via handle closure, so a bare-pid
         # anchor would only ever justify killing a reused pid).
@@ -700,9 +725,9 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
-                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
-                    "PRIME_AGENT_BASH_SHELL": "/bin/sh",
+                    "BASE_CONTEXT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                    "BASE_CONTEXT_KERNEL_OWNER_PID": str(os.getpid()),
+                    "BASE_CONTEXT_BASH_SHELL": "/bin/sh",
                 },
             ):
                 with mock.patch.object(bash_module, "_IS_POSIX", False):
@@ -715,23 +740,25 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                                     handle = bash("echo hi")
                                     await asyncio.wait_for(handle, timeout=5)
                                     for _ in range(100):
-                                        if handle._reaped:
+                                        if handle._watch_settled:
                                             break
                                         await asyncio.sleep(0.05)
+                                    self.assertTrue(handle._watch_settled)
             active = [r for r in await _poll_journal(journal, count=1) if r["active"]]
             self.assertEqual(len(active), 1)
             self.assertIn("processStartId", active[0])
 
     async def test_windows_spawn_creates_child_inside_job(self):
+        self.enterContext(mock.patch.object(bash_module._winjob, "is_empty", return_value=True))
         sentinel = 4242
         spawned = []
         order = []
         real_journal = bash_module._record_journal
         base_spawn = _win_spawn(spawned)
 
-        def journal(pid, active):
+        def journal(pid, active, *, source=None, failures=None):
             order.append("journal")
-            return real_journal(pid, active)
+            return real_journal(pid, active, source=source, failures=failures)
 
         def spawn(job, argv, cwd, env):
             order.append("spawn")
@@ -739,7 +766,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             proc.resume = mock.Mock(side_effect=lambda: order.append("resume") or True)
             return proc
 
-        self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
+        self.enterContext(mock.patch.dict(os.environ, {"BASE_CONTEXT_BASH_SHELL": "/bin/sh"}))
         with mock.patch.object(bash_module, "_IS_POSIX", False):
             with mock.patch.object(bash_module._winjob, "spawn_in_job", spawn):
                 with mock.patch.object(bash_module, "_record_journal", journal):
@@ -771,7 +798,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             journal_calls.append((pid, active))
             return True
 
-        self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
+        self.enterContext(mock.patch.dict(os.environ, {"BASE_CONTEXT_BASH_SHELL": "/bin/sh"}))
         with mock.patch.object(bash_module, "_IS_POSIX", False):
             with mock.patch.object(bash_module._winjob, "spawn_in_job") as spawn:
                 with mock.patch.object(bash_module, "_record_journal", journal):
@@ -783,11 +810,12 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(journal_calls, [])
 
     async def test_windows_resume_failure_fails_closed(self):
+        self.enterContext(mock.patch.object(bash_module._winjob, "is_empty", return_value=True))
         sentinel = 4343
         spawned = []
         journal_calls = []
 
-        def journal(pid, active):
+        def journal(pid, active, *, source=None, failures=None):
             journal_calls.append((pid, active))
             return True
 
@@ -796,7 +824,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             spawned[0].kill()
             return True
 
-        self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
+        self.enterContext(mock.patch.dict(os.environ, {"BASE_CONTEXT_BASH_SHELL": "/bin/sh"}))
         with mock.patch.object(bash_module, "_IS_POSIX", False):
             with mock.patch.object(
                 bash_module._winjob, "spawn_in_job", _win_spawn(spawned, resume=False)
@@ -818,20 +846,23 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(journal_calls, [(spawned[0].pid, True), (spawned[0].pid, False)])
 
     async def test_windows_journal_enrollment_failure_kills_suspended_leader(self):
+        self.enterContext(mock.patch.object(bash_module._winjob, "is_empty", return_value=True))
         # A journal failure must kill the suspended, job-contained leader and retire the record.
         sentinel = 4545
         spawned = []
         journal_calls = []
 
-        def journal(pid, active):
+        def journal(pid, active, *, source=None, failures=None):
             journal_calls.append((pid, active))
+            if active:
+                failures.append(OSError("injected journal enrollment failure"))
             return not active  # enrollment fails; the retirement write succeeds
 
         def terminate(job):
             spawned[0].kill()
             return True
 
-        self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
+        self.enterContext(mock.patch.dict(os.environ, {"BASE_CONTEXT_BASH_SHELL": "/bin/sh"}))
         with mock.patch.object(bash_module, "_IS_POSIX", False):
             with mock.patch.object(bash_module._winjob, "spawn_in_job", _win_spawn(spawned)):
                 with mock.patch.object(bash_module, "_record_journal", journal):
@@ -862,7 +893,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         def spawn(job, argv, cwd, env):
             raise OSError("spawn failed")
 
-        self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
+        self.enterContext(mock.patch.dict(os.environ, {"BASE_CONTEXT_BASH_SHELL": "/bin/sh"}))
         with mock.patch.object(bash_module, "_IS_POSIX", False):
             with mock.patch.object(bash_module._winjob, "spawn_in_job", spawn):
                 with mock.patch.object(bash_module, "_record_journal", journal):
@@ -876,6 +907,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(journal_calls, [])
 
     async def test_windows_watch_taskkill_fallback_runs_before_process_handle_close(self):
+        self.enterContext(mock.patch.object(bash_module._winjob, "is_empty", return_value=True))
         # PID-reuse guard: every taskkill-by-pid must run before the handle closes.
         order = []
         spawned = []
@@ -901,7 +933,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             order.append(("taskkill", spawned[0].close.called))
             return True
 
-        self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
+        self.enterContext(mock.patch.dict(os.environ, {"BASE_CONTEXT_BASH_SHELL": "/bin/sh"}))
         with mock.patch.object(bash_module, "_IS_POSIX", False):
             with mock.patch.object(bash_module._winjob, "spawn_in_job", spawn):
                 with mock.patch.object(bash_module._winjob, "create_job", return_value=777):
@@ -921,6 +953,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_windows_kill_blocked_during_watch_reap_never_taskkills_after_close(self):
+        self.enterContext(mock.patch.object(bash_module._winjob, "is_empty", return_value=True))
         # kill() blocked on the reap lock must become a no-op, never a raw-pid taskkill.
         spawned = []
         entered, release = threading.Event(), threading.Event()
@@ -933,7 +966,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             assert release.wait(timeout=10)
             return True
 
-        self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
+        self.enterContext(mock.patch.dict(os.environ, {"BASE_CONTEXT_BASH_SHELL": "/bin/sh"}))
         with mock.patch.object(bash_module, "_IS_POSIX", False):
             with mock.patch.object(bash_module._winjob, "spawn_in_job", spawn):
                 with mock.patch.object(bash_module._winjob, "create_job", return_value=778):
@@ -981,6 +1014,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         journal.assert_not_called()
 
     async def test_kill_live_handles_blocked_on_abort_never_taskkills_after_close(self):
+        self.enterContext(mock.patch.object(bash_module._winjob, "is_empty", return_value=True))
         # PID-reuse guard on the abort path: abort's reaped+close section must block
         # on _kill_lock while a raw-pid taskkill is in flight, so the handle can
         # never close mid-taskkill.
@@ -1006,8 +1040,10 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             proc.stdout = mock.Mock(close=mock.Mock(side_effect=gated_close))
             return proc
 
-        def journal(pid, active):
+        def journal(pid, active, *, source=None, failures=None):
             journal_calls.append((pid, active))
+            if active:
+                failures.append(OSError("injected journal enrollment failure"))
             return not active  # enrollment fails -> _abort_spawn; retirement succeeds
 
         def terminate(job):
@@ -1023,7 +1059,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             assert tk_release.wait(timeout=10)
             return True
 
-        self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
+        self.enterContext(mock.patch.dict(os.environ, {"BASE_CONTEXT_BASH_SHELL": "/bin/sh"}))
         loop = asyncio.get_running_loop()
         with mock.patch.object(bash_module, "_IS_POSIX", False):
             with mock.patch.object(bash_module._winjob, "spawn_in_job", spawn):
@@ -1176,8 +1212,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
-                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+                    "BASE_CONTEXT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                    "BASE_CONTEXT_KERNEL_OWNER_PID": str(os.getpid()),
                 },
             ):
                 handle = bash("sleep 30")
@@ -1193,6 +1229,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 finally:
                     handle.kill(signal.SIGKILL)
                     await asyncio.wait_for(handle, timeout=5)
+                    await self._settle_handles([handle])
 
     async def test_signal_group_reports_delivery(self):
         if not bash_module._IS_POSIX:
@@ -1218,8 +1255,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": tmp,  # a directory: open fails
-                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+                    "BASE_CONTEXT_INTERNAL_ORPHAN_PROCESS_JOURNAL": tmp,  # a directory: open fails
+                    "BASE_CONTEXT_KERNEL_OWNER_PID": str(os.getpid()),
                 },
             ):
                 with mock.patch.object(bash_module.subprocess, "Popen", capturing_popen):
@@ -1328,8 +1365,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
-                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+                    "BASE_CONTEXT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                    "BASE_CONTEXT_KERNEL_OWNER_PID": str(os.getpid()),
                 },
             ):
                 with mock.patch.object(bash_module.os, "write", partial_write):

@@ -392,6 +392,7 @@ import {
 } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
+import { normalizeTaskContract, renderTaskContract, type TaskContract } from "./task-contract.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
 import { acpMcpToolNames, createAcpMcpToolDefinitions } from "./tools/acp-mcp.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
@@ -13913,7 +13914,14 @@ export class AgentSession {
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
-		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
+		const {
+			name: rawName,
+			model: rawModel,
+			thinking: rawThinking,
+			task_contract: rawTaskContract,
+			...unsupported
+		} = kwargs;
+		const taskContract = rawTaskContract as TaskContract | undefined;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
 			throw new Error(`Unsupported rlm.run kwargs: ${unsupportedKwargs.sort().join(", ")}`);
@@ -14074,7 +14082,7 @@ export class AgentSession {
 					void usageSettlement.catch(() => undefined);
 				});
 				run.unsubscribe = unsubscribeChildEvents;
-				const content = `[task from parent]\n\n${prompt}`;
+				const content = `[task from parent]\n\n${prompt}${taskContract ? `\n\n${renderTaskContract(taskContract)}` : ""}`;
 				const spawnMessage: AgentSessionMessage = {
 					role: "custom",
 					customType: AGENT_MESSAGE_CUSTOM_TYPE,
@@ -14083,6 +14091,7 @@ export class AgentSession {
 					details: {
 						id: `spawn:${run.id}`,
 						message: prompt,
+						...(taskContract ? { taskContract } : {}),
 						from: {
 							sessionId: this.sessionId,
 							sessionName: this.sessionName,
@@ -14288,6 +14297,9 @@ export class AgentSession {
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
+		if (kwargs.task_contract !== undefined) {
+			kwargs = { ...kwargs, task_contract: normalizeTaskContract(kwargs.task_contract) };
+		}
 		// Snapshot before any await: the spawning request is the turn whose tool call is
 		// executing now. A spawn arriving outside an active run (a detached kernel task
 		// firing while the parent is idle) has no such turn; an absent edge beats a wrong one.

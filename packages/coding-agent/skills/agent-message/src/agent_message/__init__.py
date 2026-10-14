@@ -70,6 +70,7 @@ async def send_result(
     summary: str,
     findings: str,
     *,
+    outcome: dict[str, object] | None = None,
     receiver_role: ReceiverRole | str = "parent",
     receiver_name: str | None = None,
 ) -> dict[str, Any]:
@@ -78,6 +79,8 @@ async def send_result(
         raise TypeError(f"summary must be str, got {type(summary).__name__}")
     if not isinstance(findings, str):
         raise TypeError(f"findings must be str, got {type(findings).__name__}")
+    if outcome is not None and not isinstance(outcome, dict):
+        raise TypeError("outcome must be a dict or None")
     if receiver_role not in ("parent", "sibling", "child"):
         raise ValueError('receiver_role must be "parent", "sibling", or "child"')
     if receiver_role == "parent":
@@ -90,6 +93,7 @@ async def send_result(
         {
             "summary": summary,
             "findings": findings,
+            **({"outcome": outcome} if outcome is not None else {}),
             "receiver_role": receiver_role,
             "receiver_name": receiver_name,
         },

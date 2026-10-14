@@ -55,10 +55,21 @@ _hook_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
+class BashExecutionContext:
+    """Launch snapshot; mode is caller-declared metadata, not an inferred interpreter."""
+
+    command: str
+    cwd: str
+    shell: str
+    mode: str | None = None
+
+
+@dataclass(frozen=True)
 class BashResult:
     exit_code: int
     output: str
     duration: float
+    context: BashExecutionContext | None = None
 
 
 class _BoundedBuffer:
@@ -119,7 +130,7 @@ class BashHandle:
     handle; later awaits only wait and cancelling them leaves it running.
     """
 
-    def __init__(self, command: str) -> None:
+    def __init__(self, command: str, *, cwd: str | os.PathLike[str] | None = None, mode: str | None = None) -> None:
         self._orphan_source = (product_env("INTERNAL_ORPHAN_PROCESS_JOURNAL"), product_env("KERNEL_OWNER_PID"))
         self._constructing = True
         self._setup_resources = False
@@ -133,13 +144,25 @@ class BashHandle:
             _live_handles.add(self)
         try:
             _install_shutdown_hook()
-            self._start(command)
+            self._start(command, cwd=cwd, mode=mode)
         finally:
             with _live_lock:
                 self._constructing = False
                 self._retire_admission_locked()
 
-    def _start(self, command: str) -> None:
+    def _start(self, command: str, *, cwd: str | os.PathLike[str] | None, mode: str | None) -> None:
+        if mode is not None and not isinstance(mode, str):
+            raise TypeError("mode must be a caller-declared str or None")
+        launch_cwd = os.getcwd() if cwd is None else os.fspath(cwd)
+        if not isinstance(launch_cwd, str):
+            raise TypeError("cwd must be a str or os.PathLike[str]")
+        if not launch_cwd:
+            raise FileNotFoundError(2, "No such file or directory", launch_cwd)
+        launch_cwd = os.path.realpath(launch_cwd, strict=True)
+        shell = _shell()
+        if not os.path.isabs(shell):
+            shell = os.path.join(os.getcwd(), shell)
+        self._context = BashExecutionContext(command=command, cwd=launch_cwd, shell=shell, mode=mode)
         self.command = command
         self._buffer = _BoundedBuffer()
         self._done = threading.Event()
@@ -211,8 +234,8 @@ class BashHandle:
             self._proc: subprocess.Popen[bytes] | _winjob.JobProcess
             if _IS_POSIX:
                 self._proc = subprocess.Popen(
-                    [_shell(), "-c", script],
-                    cwd=os.getcwd(),
+                    [self.context.shell, "-c", script],
+                    cwd=self.context.cwd,
                     env=_child_env(),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -221,7 +244,7 @@ class BashHandle:
                 )
             else:
                 self._proc = _winjob.spawn_in_job(
-                    self._job, [_shell(), "-c", script], cwd=os.getcwd(), env=_child_env()
+                    self._job, [self.context.shell, "-c", script], cwd=self.context.cwd, env=_child_env()
                 )
         except BaseException:
             for fd in (self._status_read, self._wake_read, self._wake_write):
@@ -310,6 +333,11 @@ class BashHandle:
             with _live_lock:
                 self._workers_pending -= 1
                 self._retire_admission_locked()
+
+    @property
+    def context(self) -> BashExecutionContext:
+        """Immutable launch context; reading it does not change await ownership."""
+        return self._context
 
     @property
     def pid(self) -> int:
@@ -581,6 +609,7 @@ class BashHandle:
                 exit_code=exit_code,
                 output=self._buffer.text() if output is None else output,
                 duration=time.monotonic() - self._started,
+                context=self.context,
             )
             self._done.set()
             callbacks = self._callbacks
@@ -780,8 +809,16 @@ class BashHandle:
         return f"<BashHandle pid={self._pid} {state} command={self.command!r}>"
 
 
-def bash(command: str) -> BashHandle:
+def bash(command: str, *, cwd: str | os.PathLike[str] | None = None, mode: str | None = None) -> BashHandle:
     """Start a shell command immediately; await the handle for the result.
+
+    cwd defaults to the current directory at launch. Explicit relative paths
+    resolve from that directory, including symlinks. The resolved launch cwd,
+    selected shell, original command, and optional caller-declared mode are
+    shared by handle.context and result.context. mode is metadata only: it
+    does not select a runtime or infer interpreters used by a pipeline. No
+    environment snapshot is captured. Commands and prefixes may change their
+    own cwd after launch without changing this snapshot.
 
     `await bash(cmd)` is a one-shot: cancelling the await (e.g. an interrupt)
     kills the command's process group. `h = bash(cmd)` used as a background
@@ -797,7 +834,7 @@ def bash(command: str) -> BashHandle:
     """
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
-    return BashHandle(command)
+    return BashHandle(command, cwd=cwd, mode=mode)
 
 
 def _shell() -> str:

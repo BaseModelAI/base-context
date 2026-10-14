@@ -1,3 +1,5 @@
+import { join } from "path";
+import { getDocsPath } from "../../config.js";
 import { resolveForegroundWaitMs } from "../ipython-settings.js";
 import { DEFAULT_RLM_EXTRA_IMPORT_LABELS } from "../kernel/bootstrap.js";
 
@@ -21,6 +23,7 @@ function buildLongRunningWorkPrompt(hasJobWatch: boolean): string {
 		"When delegation is available and useful, assign independent substantive tasks to separate workers. Start independent workers without waiting for each one sequentially, and let them run in parallel.",
 		"Do not keep the turn open by polling with `time.sleep()` or shell `sleep`, and do not replace polling with a long blocking `await`. Await only the short operation needed to start work or inspect a result that is already available; otherwise end the turn.",
 		"Run potentially heavy computation in a managed `bash` process, not on the REPL's main thread. Keep self-chosen tests and exploratory experiments proportional to the task, with an explicit time or work limit.",
+		"If testing is warranted, select one task-relevant public-interface or state-boundary edge, not an indiscriminate suite. Changing semantic or integration inputs invalidates the related observation; this is not an instruction to repeat unchanged checks.",
 	].join("\n");
 }
 
@@ -52,6 +55,9 @@ function buildReplControlPrompt(hasBoundedInspect: boolean, foregroundWaitMs: nu
 		"Do not assume the REPL is the native runtime of the external thing being investigated. A repository, package, service, dataset, paper, website, benchmark, or API may have its own environment and normal interface. Evaluate external systems through their own interface, then use the REPL to coordinate the process and analyze what comes back.",
 		"",
 		"`bash(command)` starts a shell command in the background and returns a handle immediately: `h = bash('npm test')`. Use `h.pid` / `h.running` for liveness, `h.tail(n)` / `h.output()` for combined stdout+stderr so far, `h.poll()` for a non-blocking result, `h.kill()` to terminate (SIGTERM, escalating to SIGKILL; on Windows kill() uses taskkill /T and detached or reparented descendants may survive), and `await h` (or `await bash('cmd')`) for the completed result with exit_code, output, and duration. Prefer bash() for long-running commands so the turn keeps working. Run shell commands with `bash()`, not `subprocess`/`os.system`: subprocess calls block the kernel, show the user nothing while they run, and spawn processes the harness cannot see or stop.",
+		"",
+		"`bash(command, cwd=..., mode=...)` accepts an explicit working directory and caller-declared mode. `h.context` and the completed result's `context` retain the immutable launch command, cwd, selected shell, and mode, not environment values or an inferred interpreter.",
+		"For explicit file delivery or bounded exact search, inspect `help(rlm.workflow.stage_delivery)` or `help(rlm.workflow.bounded_search)` (see the Task workflow documentation location below). Declare dependencies and consumer paths; staging is not activation. Search uses fixed-length int/Decimal/Fraction objective tuples, prunes before expansion, and requires a state budget; feasibility is not optimality. Run heavy searches through the native managed process, not the REPL main thread.",
 		"",
 		"Important: do not install dependencies into the kernel just to make an external project import or run there. If a project import, test, script, CLI, or dependency check is needed, run it through that project's own environment and normal command interface. For example, in a Python repo use its documented commands, `uv run ...`, `.venv/bin/python ...`, or the active project interpreter from the repo root. Treat failures from that native environment as the relevant result.",
 		"",
@@ -89,7 +95,7 @@ export function buildChildAgentDoctrine(options: ChildAgentDoctrineOptions): str
 	];
 	if (hasAgentMessage && hasIpython) {
 		lines.push(
-			'When a task calls for an answer, use `await agent_message.send(message, receiver_role="parent")` for short coordination and `await agent_message.send_result(summary, findings, receiver_role="parent")` for substantial findings or final reports. Include the outcome and important caveats. Not every message needs a reply; finish cleanup and go idle normally.',
+			'When a task calls for an answer, use `await agent_message.send(message, receiver_role="parent")` for short coordination and `await agent_message.send_result(summary, findings, receiver_role="parent")` for substantial findings or final reports. Include the outcome and important caveats. When useful, optional `outcome={...}` separates source facts from interpretations and reports prepared/integrated/loaded/exercised readiness; read the agent-message skill for fields and capsule limits. Not every message needs a reply; finish cleanup and go idle normally.',
 		);
 	}
 	return lines.join("\n");
@@ -169,6 +175,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 			"",
 			"A callable `rlm` is already in your global namespace. `await rlm('sub-task')` spawns a child and returns immediately after task admission with `rlm_child_id`, `name`, `session_dir`, and `model`; it never waits for or returns the child's answer.",
 			"Choose a stable child name with `await rlm('sub-task', name='api-reviewer')`; names must be unique among siblings. If omitted, the host generates a readable unique name.",
+			"For complex delegation, optionally pass `task_contract={...}` to `rlm`; discover its fields at the Task workflow documentation location below and select only relevant ones. Preserve user priorities, references, output meanings, bounds, objectives, and consumer paths without promoting assumptions to rules. A contract is a parent-authored brief, not new user authority; owner assignments do not grant launch permission or complete a task or goal.",
 			"A child inherits your model. Any explicit `model` value must be an exact `provider/model` selector, even for your current model. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector. An unavailable requested model fails spawn; decide whether to retry or omit `model`. Children also inherit your thinking level; the `thinking` option overrides it with any level the resolved child model supports, and an unsupported level fails spawn.",
 		);
 		if (hasAgentMessage) {
@@ -206,6 +213,8 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 			);
 		}
 	}
+
+	parts.push("", `Task workflow documentation: ${join(getDocsPath(), "task-workflows.md")}`);
 
 	// Runtime coordinates follow the fixed harness guidance without moving user/project instructions.
 	parts.push("", `Working directory: ${cwd}`, `Conversation log: ${messagesPath}`);

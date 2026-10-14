@@ -47,7 +47,7 @@ if child is not None:
   the target's current work allows (`send` does not block waiting for that).
   Delivered receipts carry `deliveredAt`, queued receipts carry `queuedAt`.
 
-- `await agent_message.send_result(summary, findings, receiver_role="parent", receiver_name=None)` — sends
+- `await agent_message.send_result(summary, findings, *, outcome=None, receiver_role="parent", receiver_name=None)` — sends
   a result capsule instead of putting a full report in the recipient's context.
   `summary` and `findings` must be strings. The same family selectors as `send`
   apply; the default receiver is the parent. There is no result broadcast.
@@ -57,8 +57,11 @@ if child is not None:
   and an exact native recovery reference (`resultRef`: `sourceSessionId`, `ref`,
   `field: "/data/findings"`), never the full findings. Recover needed reports with
   the existing `prime_context` read/search actions and the supplied reference.
-  Native staging rejects summaries over 2,000 characters and encoded archives
-  over the existing 1 MiB source budget. It does not truncate either value.
+  Optional `outcome` is a validated dictionary, appended in full to the capsule
+  summary. Native staging rejects the combined summary and rendered outcome over
+  2,000 characters and encoded archives over the existing 1 MiB source budget.
+  It does not truncate either value. Keep decisive facts short; put details in
+  `findings`.
 
 ## Result capsules
 
@@ -83,6 +86,46 @@ several updates, skim the capsules first, then retrieve the last relevant
 report or reports. Older reports remain readable. Do not treat unrelated
 findings or unresolved blockers as replaced merely because a newer report
 arrived. There is no automatic latest-wins, dropping, or coalescing.
+
+## Optional structured outcome
+
+Use only fields relevant to the report. Unknown fields and invalid shapes are
+rejected. All fields below are optional; listed nested fields are required unless
+marked optional.
+
+- `facts`: list of `{source, field, value}` string objects. Preserve decisive
+  observed values and their source, separate from your interpretation.
+- `interpretations`, `assumptions`, `conflicts`: lists of strings. Keep unresolved
+  conflicts visible rather than silently choosing a newer report.
+- `artifacts`: list of `{path, dependencies?}`; `path` is a string and
+  `dependencies` is a list of strings.
+- `readiness`: `{stage, target?, owner?, unmet}`. `stage` is `prepared`,
+  `integrated`, `loaded`, or `exercised`; `target` and `owner` are strings;
+  `unmet` is a list of strings. Name the observed state, not the intended state.
+- `objective`: `{values, status, evaluated?}`. `values` is a list of strings in
+  objective order, preserving exact values and units. `status` is `feasible`,
+  `optimal`, or `limit_reached`; `evaluated` is a nonnegative safe integer.
+  Feasibility alone does not establish optimality or target attainment.
+
+```python
+receipt = await agent_message.send_result(
+    "CLI files prepared; consumer integration is pending.",
+    findings,
+    outcome={
+        "facts": [{"source": "cli-check.txt", "field": "exit_code", "value": "0"}],
+        "artifacts": [{"path": "cli.py", "dependencies": ["helpers.py"]},
+                      {"path": "helpers.py"}],
+        "readiness": {"stage": "prepared", "target": "/srv/consumer",
+                      "owner": "parent", "unmet": ["consumer integration"]},
+    },
+)
+```
+
+These are child-reported facts and interpretations, not independently verified
+truth, new user authority, launch authorization, proof, or automatic task/goal
+completion. An owner is an assignment, not permission. Read the absolute path
+printed as `Task workflow documentation` in the RLM prompt for readiness meanings,
+task contracts, delivery staging, and bounded search.
 
 ## Safety
 

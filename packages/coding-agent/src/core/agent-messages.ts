@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
-import type { AgentResultReference } from "./agent-results.js";
+import { type AgentResultReference, normalizeAgentResultSummary } from "./agent-results.js";
 import type { HostRequestHandler } from "./kernel/index.js";
 import type { CustomMessage } from "./messages.js";
 import { HEARTBEAT_PROMPT_CUSTOM_TYPE } from "./messages.js";
 import { canonicalSessionPath } from "./session-lease.js";
+import { normalizeTaskOutcome, renderTaskOutcome, type TaskContract } from "./task-contract.js";
 
 export const AGENT_MESSAGE_CUSTOM_TYPE = "agent_message";
 export const AGENT_MESSAGE_SKILL_NAME = "agent-message";
@@ -124,6 +125,7 @@ export interface AgentSessionMessagePayload {
 export interface AgentSessionMessageDetails {
 	id: string;
 	message: string;
+	taskContract?: TaskContract;
 	from?: AgentSessionMessageSender;
 	fromRelationship?: AgentFamilyRelationship;
 	target?: AgentSessionMessageEndpoint;
@@ -550,6 +552,15 @@ export function createAgentMessageHostHandlers(
 			if (typeof payload.findings !== "string") {
 				throw new Error("agent_message.send_result findings must be a string");
 			}
+			let summary = payload.summary;
+			let findings = payload.findings;
+			if (payload.outcome !== undefined) {
+				summary = normalizeAgentResultSummary(summary);
+				if (!findings.trim()) throw new Error("Agent result findings must not be empty");
+				const rendered = renderTaskOutcome(normalizeTaskOutcome(payload.outcome));
+				summary = normalizeAgentResultSummary(`${summary}\n\n${rendered}`);
+				findings = `${findings}\n\n${rendered}`;
+			}
 			if (payload.target !== undefined) {
 				throw new Error("agent_message.send_result uses receiver_role and receiver_name, not positional targets");
 			}
@@ -585,8 +596,8 @@ export function createAgentMessageHostHandlers(
 			}
 			return (await controller.sendAgentMessage({
 				target: matches[0]!.id,
-				message: payload.summary,
-				findings: payload.findings,
+				message: summary,
+				findings,
 				receiverRole: role,
 			})) as unknown as Record<string, unknown>;
 		},

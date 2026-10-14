@@ -870,7 +870,10 @@ describe("AgentSession rlm recursion", () => {
 			}),
 		]);
 		const child = root.getRlmChildSession(result.rlm_child_id);
-		expect(child?.messages[0]).toMatchObject({
+		const spawnMessage = child?.messages.find(
+			(message) => isAgentSessionMessage(message) && message.details.id === `spawn:${result.rlm_child_id}`,
+		);
+		expect(spawnMessage).toMatchObject({
 			role: "custom",
 			customType: "agent_message",
 			content: "[task from parent]\n\nsummarize shard 1",
