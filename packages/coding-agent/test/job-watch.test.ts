@@ -166,6 +166,17 @@ describe("job-watch deterministic scheduling", () => {
 		expect(f.controller.status(first.id)).toMatchObject({ pending_events: 0 });
 	});
 
+	it("preserves an earlier unrelated hold when a later park finds consumed completion", async () => {
+		const f = fixture(true);
+		const active = await watch(f);
+		const completed = await watch(f, { resource_id: "completed" });
+		await observe(f, completed, f.observation("succeeded"));
+		await f.controller.consume(completed.id);
+		expect(await f.controller.park([active.id])).toMatchObject({ parked: true });
+		expect(await f.controller.park([completed.id])).toEqual({ parked: false, reason: "event_available" });
+		expect(f.controller.isParked()).toBe(true);
+		expect(f.snapshot().parked?.ids).toEqual([active.id]);
+	});
 	it("keeps late-park promotion scoped and releases its hold on explicit consume", async () => {
 		const f = fixture(true);
 		const awaited = await watch(f);
@@ -415,15 +426,27 @@ describe("job-watch deterministic scheduling", () => {
 	});
 	it("keeps five-minute checks when reports and a deadline fall between them", async () => {
 		const f = fixture();
-		await watch(f, { report_every: "7m", deadline: "2026-01-01T00:02:00Z" });
+		const w = await watch(f, { report_every: "7m", deadline: "2026-01-01T00:02:00Z" });
+		const repeated = await watch(f, { deadline: "2026-01-01T01:00:00Z" });
+		expect(repeated.id).toBe(w.id);
+		expect(f.snapshot().watches[0].deadline).toBe(Date.parse("2026-01-01T00:02:00Z"));
+		f.setObservation(f.observation("pending"));
+		await f.controller.park([w.id]);
 		await f.advance(120000);
 		expect(f.probes).toHaveLength(1);
+		expect(f.notices).toMatchObject([{ reasons: ["deadline"], state: "pending" }]);
+		expect(f.controller.isParked()).toBe(false);
+		expect(f.controller.status(w.id)).toMatchObject({ state: "pending", active: true });
 		await f.advance(180000);
 		expect(f.probes).toHaveLength(2); // 5-minute check
 		await f.advance(120000);
 		expect(f.probes).toHaveLength(3); // 7-minute report
 		await f.advance(180000);
 		expect(f.probes).toHaveLength(4); // 10-minute check remains due
+		await f.controller.unregister(w.id);
+		const renewed = await watch(f, { deadline: "2026-01-01T00:20:00Z" });
+		expect(renewed.id).not.toBe(w.id);
+		expect(f.snapshot().watches[0].deadline).toBe(Date.parse("2026-01-01T00:20:00Z"));
 	});
 	it("keeps critical evidence as a barrier while superseding unread routine snapshots", async () => {
 		const f = fixture();

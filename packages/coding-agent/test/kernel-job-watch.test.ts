@@ -36,6 +36,7 @@ describe("job-watch native kernel bridge", () => {
 			"job_watch.watch": async (payload: Record<string, unknown>) => {
 				calls.push("watch");
 				expect(payload.completion_source).toBe("handle");
+				expect(payload.deadline).toBeNull();
 				return { id: "watch", generation: "generation" };
 			},
 			"job_watch.observation": async (payload: Record<string, unknown>) => {
@@ -86,6 +87,10 @@ await job_watch.unregister("watch")
 transferred = await job_watch.consume("watch")
 assert transferred == {"events": [{"event_id": "completion", "watch_id": "watch", "state": "succeeded"}], "deferred_event_ids": []}`);
 		expect(transferred.status, JSON.stringify(transferred)).toBe("ok");
+		expect(transferred.stdout).toContain(
+			'"terminal_events":[{"event_id":"completion","watch_id":"watch","state":"succeeded"}]',
+		);
+		expect(transferred.stdout).toContain("Inspect the full returned events");
 		expect(calls).toEqual(["watch", "park", "status", "unregister", "consume"]);
 	});
 	it("passes an all-watch consume request through without changing deferred evidence", async () => {
@@ -99,6 +104,96 @@ assert transferred == {"events": [{"event_id": "completion", "watch_id": "watch"
 result = await job_watch.consume()
 assert result == {"events": [], "deferred_event_ids": ["selected-event"]}`);
 		expect(result.status, JSON.stringify(result)).toBe("ok");
+		expect(result.stdout).toBe("");
+	});
+	it("maps probe wait budgets to the existing deadline without changing probe timeouts", async () => {
+		const deadlines: number[] = [];
+		const before = Date.now();
+		const { manager } = create({
+			"job_watch.watch": async (payload: Record<string, unknown>) => {
+				deadlines.push(Date.parse(String(payload.deadline)));
+				expect(payload.wait_budget).toBeUndefined();
+				expect(payload.timeout_ms).toBe(30000);
+				return { id: "watch", generation: "generation" };
+			},
+		});
+		const result = await manager.execute(`${load}
+_ = await job_watch.watch(job_id="default", completion_source="probe", probe_command="printf pending")
+_ = await job_watch.watch(job_id="explicit", completion_source="probe", probe_command="printf pending", wait_budget=60)
+_ = await job_watch.watch(job_id="absolute", completion_source="probe", probe_command="printf pending", deadline="2026-01-01T00:05:00Z")
+_ = await job_watch.watch(job_id="fractional", completion_source="probe", probe_command="printf pending", wait_budget=0.125)
+_ = await job_watch.watch(job_id="tiny", completion_source="probe", probe_command="printf pending", wait_budget=5e-324)`);
+		expect(result.status, JSON.stringify(result)).toBe("ok");
+		const after = Date.now();
+		expect(deadlines[0]).toBeGreaterThanOrEqual(before + 900000);
+		expect(deadlines[0]).toBeLessThanOrEqual(after + 900000);
+		expect(deadlines[1]).toBeGreaterThanOrEqual(before + 60000);
+		expect(deadlines[1]).toBeLessThanOrEqual(after + 60000);
+		expect(deadlines[2]).toBe(Date.parse("2026-01-01T00:05:00Z"));
+		expect(deadlines[3]).toBeGreaterThanOrEqual(before + 125);
+		expect(deadlines[3]).toBeLessThanOrEqual(after + 125);
+		expect(deadlines[4]).toBeGreaterThanOrEqual(before);
+		expect(deadlines[4]).toBeLessThanOrEqual(after);
+	});
+	it("rejects conflicting, invalid, or unrepresentable wait budgets before registration", async () => {
+		let registrations = 0;
+		const { manager } = create({
+			"job_watch.watch": async () => {
+				registrations++;
+				return {};
+			},
+		});
+		const result = await manager.execute(`${load}
+for options in ({"wait_budget": 60, "deadline": "2026-01-01T00:05:00Z"}, *({"wait_budget": value} for value in (0, -1, float("inf"), float("nan"), True, "60", 1e300, 10**1000))):
+    try:
+        await job_watch.watch(job_id="remote", completion_source="probe", probe_command="printf pending", **options)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid budget registered")`);
+		expect(result.status, JSON.stringify(result)).toBe("ok");
+		expect(registrations).toBe(0);
+	});
+	it("bounds assigned terminal receipts and explains failed parking without exposing payloads", async () => {
+		const events = Array.from({ length: 10 }, (_, index) => ({
+			event_id: `event-${index}`,
+			watch_id: "watch",
+			state: index === 0 ? "failed" : "succeeded",
+			progress: { private_payload: "do not print this payload" },
+		}));
+		const { manager } = create({
+			"job_watch.consume": async () => ({ events, deferred_event_ids: ["in-flight"] }),
+			"job_watch.park": async () => ({ parked: false, reason: "event_available" }),
+		});
+		const result = await manager.execute(`${load}
+transferred = await job_watch.consume("watch")
+assert len(transferred["events"]) == 10
+assert transferred["events"][0]["progress"]["private_payload"] == "do not print this payload"
+assert transferred["deferred_event_ids"] == ["in-flight"]
+parked = await job_watch.park(["watch"])
+assert parked == {"parked": False, "reason": "event_available"}`);
+		expect(result.status, JSON.stringify(result)).toBe("ok");
+		expect(Buffer.byteLength(result.stdout)).toBeLessThan(2048);
+		expect(result.stdout).toContain('"additional_terminal_events":2');
+		expect(result.stdout).toContain('"state":"failed"');
+		expect(result.stdout).not.toContain("private_payload");
+		expect(result.stdout).not.toContain("do not print this payload");
+		expect(result.stdout).toContain("no new continuation hold for the requested watches");
+		expect(result.stdout).toContain("An earlier hold may remain");
+		expect(result.stdout).toContain("Do not assume a later automatic turn");
+	});
+	it("shows assigned monitoring refusal without changing its return", async () => {
+		const { manager } = create({
+			"job_watch.park": async () => ({ parked: false, reason: "monitoring_unavailable" }),
+		});
+		const result = await manager.execute(`${load}
+parked = await job_watch.park(["watch"])
+assert parked == {"parked": False, "reason": "monitoring_unavailable"}`);
+		expect(result.status, JSON.stringify(result)).toBe("ok");
+		expect(result.stdout).toContain("monitoring unavailable; no new continuation hold");
+		expect(result.stdout).toContain("An earlier hold may remain");
+		expect(result.stdout).toContain("retained partial evidence");
+		expect(result.stdout).toContain("Do not relaunch the job or assume completion");
 	});
 	it("runs and parses a read-only native probe while another notebook cell is active", async () => {
 		const { manager } = create();

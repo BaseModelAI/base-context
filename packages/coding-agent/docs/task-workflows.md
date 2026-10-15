@@ -87,7 +87,26 @@ with older evidence.
 
 ## Deliver the declared files and dependencies
 
-Inspect `help(rlm.workflow.stage_delivery)` for the full helper contract:
+Carry supplied consumer transfer paths, exclusions, service/step distinctions,
+and execution mode into delivery-specific child briefs. Preserve transfer rules
+in `task_contract.rules` and selected concrete files and dependencies in
+`task_contract.delivery`. Unknown transfer metadata stays unknown; do not infer
+an allowlist or add a sidecar the consumer cannot receive. A local workspace run
+is not evidence that a separately transferred program has its dependencies.
+
+Pass an existing delivery declaration directly to the helper:
+
+```python
+stage = rlm.workflow.stage_delivery(task_contract["delivery"], "/work/staged-cli")
+```
+
+The destination is explicit. `consumer_root` and `mode` describe the consumer;
+they do not select the staging destination or authorize activation. Use the
+staged consumer representation for any already-authorized normal invocation,
+not the development workspace with undeclared helpers still present.
+
+Inspect `help(rlm.workflow.stage_delivery)` for the full helper contract. Without
+an existing delivery declaration, pass explicit files and dependencies:
 
 ```python
 stage = rlm.workflow.stage_delivery(
@@ -161,6 +180,42 @@ infer interpreters in a pipeline. `mode` is metadata; it does not select a runti
 A command can change its own directory without changing the launch snapshot.
 Use the target project's native environment. Start only authorized work, and use
 `job_watch` for repeated job checks rather than a polling loop.
+
+## Bound external waits and inspect terminal results
+
+An individual `probe_timeout` limits one probe, not the total wait for a remote
+job. Set `wait_budget` in seconds or an absolute ISO `deadline` when registering
+an external dependency, not both. For example, for an already-launched job:
+
+```python
+watch = await job_watch.watch(
+    job_id=remote_job_id,
+    completion_source="probe",
+    probe_command=read_only_status_command,
+    wait_budget=600,
+    interval="30s",
+)
+```
+
+Detached probe watches default to a 15-minute owner review when neither budget
+nor deadline is supplied. The deadline wakes the owner once; monitoring and the
+external job continue, with no automatic cancellation, retry, or provider switch.
+Review partial results and elapsed/queued time, report unresolved work, and decide
+whether to stop waiting or explicitly renew observation with a new budget. See
+[job-watch](../skills/job-watch/SKILL.md) for the registration and renewal API.
+
+`events = await job_watch.consume(watch["id"])` emits a compact terminal receipt
+even when assigned. The full return still contains the evidence. Inspect the
+relevant event details before choosing an artifact or reporting completion;
+a successful process is not necessarily a successful task outcome.
+
+Check the result of `await job_watch.park([watch["id"]])`. If `parked` is true,
+end the turn. If it is false with `reason="event_available"`, no continuation
+hold was acquired by this call; an earlier hold may remain. Inspect already-consumed
+evidence or call `consume`/`status`,
+then act on the actual result. Do not assume another automatic turn. If events
+are already queued or in flight, let normal delivery run instead of polling.
+When waiting only for a child reply, end the turn without parking.
 
 ## Search within an explicit work limit
 

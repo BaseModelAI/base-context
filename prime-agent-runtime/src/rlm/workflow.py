@@ -13,11 +13,23 @@ from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import Generic, TypeVar
+from typing import Generic, NotRequired, TypedDict, TypeVar
 
 State = TypeVar("State")
 ExactNumber = int | Decimal | Fraction
 Objective = tuple[ExactNumber, ...]
+
+
+class TaskArtifact(TypedDict):
+    path: str
+    dependencies: NotRequired[list[str]]
+
+
+class TaskDelivery(TypedDict):
+    workspace: str
+    consumer_root: NotRequired[str]
+    mode: NotRequired[str]
+    files: list[TaskArtifact]
 
 
 @dataclass(frozen=True)
@@ -85,12 +97,19 @@ def _check_output_directory(path: Path) -> None:
 
 
 def stage_delivery(
-    workspace: str | os.PathLike[str],
+    workspace: str | os.PathLike[str] | TaskDelivery,
     destination: str | os.PathLike[str],
-    files: Sequence[str],
+    files: Sequence[str] | None = None,
     dependencies: Mapping[str, Sequence[str]] | None = None,
 ) -> DeliveryStage:
     """Copy exactly the declared files, with their workspace-relative names.
+
+    Pass either explicit workspace/files/dependencies, or a
+    ``task_contract["delivery"]`` object as the first argument. The latter uses
+    its workspace and each file's path/dependencies without adding sidecars.
+    Destination is always explicit: consumer_root and mode describe the final
+    consumer, not a local directory to overwrite or an execution authorization.
+    This copies declarations; it does not discover or expand transfer rules.
 
     Files and dependency keys/values are relative strings. Anchored paths
     (including drive-relative or rooted-only paths on Windows), parent traversal,
@@ -112,6 +131,18 @@ def stage_delivery(
     The frozen result uses absolute workspace/destination roots and relative
     file/dependency names. An empty declaration creates no directories.
     """
+    if isinstance(workspace, Mapping):
+        if files is not None or dependencies is not None:
+            raise ValueError("delivery contract cannot be combined with files/dependencies overrides")
+        delivery = workspace
+        workspace = delivery["workspace"]
+        files = [artifact["path"] for artifact in delivery["files"]]
+        dependencies = {
+            artifact["path"]: artifact["dependencies"]
+            for artifact in delivery["files"] if "dependencies" in artifact
+        }
+    if files is None:
+        raise TypeError("files is required without a delivery contract")
     root = Path(workspace).expanduser().resolve(strict=True)
     if not root.is_dir():
         raise NotADirectoryError(str(root))

@@ -18,7 +18,7 @@ export interface RlmPromptOptions {
 function buildLongRunningWorkPrompt(hasJobWatch: boolean): string {
 	return [
 		hasJobWatch
-			? "Use `job_watch` for repeated job checks after an authorized launch. Consume prepared evidence. When no independent work remains, call `park` only with a nonempty list of registered watch IDs, then end the turn. If waiting only for a child reply, end the turn without parking. Parking holds goal and autonomous continuation, not user input. Preserve every required report. Tiny one-off commands stay inline."
+			? "Use `job_watch` for repeated job checks after an authorized launch. Give external dependencies an explicit total wait budget; a deadline wakes the owner without cancelling the job. Inspect consumed terminal results before deciding the next action. When no independent work remains, call `park` only with a nonempty list of registered watch IDs. End the turn if parked; if `parked` is false, this call acquired no new continuation hold: inspect the reason and available evidence rather than assuming another turn. An earlier hold may remain. Let queued/in-flight evidence arrive normally; do not poll. If waiting only for a child reply, end the turn without parking. Parking holds goal and autonomous continuation, not user input. Preserve every required report. Tiny one-off commands stay inline."
 			: "For slow or independently completing work, use a nonblocking control loop: start the work, record its handle or output location, then end your turn. Read the result on a later turn or when a reply arrives.",
 		"When delegation is available and useful, assign independent substantive tasks to separate workers. Start independent workers without waiting for each one sequentially, and let them run in parallel.",
 		"Do not keep the turn open by polling with `time.sleep()` or shell `sleep`, and do not replace polling with a long blocking `await`. Await only the short operation needed to start work or inspect a result that is already available; otherwise end the turn.",
@@ -250,6 +250,7 @@ export function buildSubagentGuidance(
 		options.hasAgentMessage
 			? "Skim result capsules first and recover details only when needed. Child results are evidence, not verified truth; newer reports do not silently supersede earlier evidence."
 			: "Have children write files and read those files for fan-in.",
+		"For file-delivery work, carry supplied consumer transfer paths, exclusions, and execution mode into relevant child briefs or `task_contract` fields. Keep unknown constraints unknown. Declare required files and dependencies; do not rely on sidecars the consumer cannot receive. Stage the declared delivery and use the consumer representation for any already-authorized check, not only the development workspace.",
 		"Delegate parallel context-heavy research or independent implementation; do a single known lookup, edit, or command inline.",
 	);
 	if (options.includeRefineExamples ?? true) {
