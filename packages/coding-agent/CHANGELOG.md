@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.11] - 2026-10-15
+
+- Added direct task-contract delivery staging and guidance that preserves consumer transfer rules through delegation.
+- Added configurable total wait budgets and a 15-minute owner wake-up default for detached probe watches, without cancelling the job.
+- Fixed silent terminal-result consumption and added actionable guidance when parking does not acquire a continuation hold.
+
 ## [1.1.10] - 2026-10-14
 
 - Added optional task contracts that keep requirements, assumptions, objectives, delivery paths, ownership, and boundary cases distinct through delegation and compaction.
