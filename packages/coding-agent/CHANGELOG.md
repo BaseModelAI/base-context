@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.12] - 2026-10-17
+
+- Changed solving and delegation guidance to preserve literal requirements, use neutral analytical briefs, and check behavior at the real consumer boundary.
+- Added optional task-contract stage interfaces and consumer, runtime, working-directory, and expected-behavior metadata for focused checks.
+- Changed compaction and result guidance to retain unresolved contrary evidence and clarify that deleting a busy child cancels its work.
+- Fixed offline lifecycle, compaction, and recovery test fixtures to follow the current runtime interfaces.
+- Fixed reopening interrupted native tools with an unchanged accepted context mode.
+
 ## [1.1.11] - 2026-10-15
 
 - Added direct task-contract delivery staging and guidance that preserves consumer transfer rules through delegation.

@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.1.12] - 2026-10-17
+
+- Fixed offline Google Vertex API-key and thinking-budget tests to match the client transport interface.
+
 ## [1.1.9] - 2026-10-14
 
 - Fixed Codex connection leaks during overlapping handshakes and requests starting after cancellation.
