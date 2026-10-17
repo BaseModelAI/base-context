@@ -10,20 +10,34 @@ import {
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 } from "../src/modes/daemon/daemon-worker-protocol.js";
 import { RlmSpawnLedger, rlmLedgerPath } from "../src/modes/daemon/rlm-ledger.js";
+import type { SupervisorLink } from "../src/modes/daemon/supervisor-link.js";
 
 const rpc = vi.hoisted(() => ({ connect: vi.fn(), hello: vi.fn(), request: vi.fn(), close: vi.fn() }));
 vi.mock("../src/modes/daemon/daemon-client.js", async (importOriginal) => ({
 	...(await importOriginal<Record<string, unknown>>()),
 	DaemonClient: class {
+		isConnected = true;
+		private closeListener?: () => void;
 		connect = rpc.connect;
 		waitForHello = rpc.hello;
 		request = rpc.request;
-		close = rpc.close;
+		onClose(listener: () => void) {
+			this.closeListener = listener;
+			return () => {
+				this.closeListener = undefined;
+			};
+		}
+		close() {
+			this.isConnected = false;
+			this.closeListener?.();
+			rpc.close();
+		}
 	},
 }));
 vi.mock("../src/core/rlm-journal-owner.js", () => ({ RlmJournalOwner: { open: vi.fn() } }));
 
 type ModeLedger = {
+	supervisorLink?: SupervisorLink;
 	rlmLedgerSessionsDir(): string;
 	openRlmJournalOwner(): Promise<void>;
 	rlmSpawnLedger(): RlmSpawnLedger;
@@ -106,18 +120,22 @@ describe("daemon ledger ownership", () => {
 		expect(existsSync(rlmLedgerPath(agentDir, sessionsDir))).toBe(false);
 		ack.resolve({ type: "response", command: "rlm_ledger_mutate", success: true });
 		await append;
-		expect(rpc.close).toHaveBeenCalledOnce();
+		expect(rpc.close).not.toHaveBeenCalled();
 
 		rpc.request.mockRejectedValueOnce(new Error("socket disconnected after send"));
 		await expect(
 			worker.rlmSpawnLedger().appendRename({ childId: "child", child: mutation.child, name: "renamed" }),
 		).rejects.toThrow("outcome may be unknown");
 		expect(rpc.request).toHaveBeenCalledTimes(2); // No automatic replay after the lost ack.
-		expect(rpc.close).toHaveBeenCalledTimes(2);
+		expect(rpc.connect).toHaveBeenCalledOnce();
+		expect(rpc.hello).toHaveBeenCalledOnce();
+		expect(rpc.close).not.toHaveBeenCalled();
 		const foreignFamily = new RlmSpawnLedger(agentDir, join(directory, "other-family"));
 		await expect(foreignFamily.appendSpawn(mutation)).rejects.toThrow("read-only");
 		expect(rpc.request).toHaveBeenCalledTimes(2);
 		await worker.closeRlmJournal();
+		worker.supervisorLink!.close();
+		expect(rpc.close).toHaveBeenCalledOnce();
 	});
 
 	it("opens a standalone external actor and drains admitted facade writes before actor close", async () => {

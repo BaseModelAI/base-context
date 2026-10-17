@@ -460,9 +460,9 @@ describe("worker roster reporter", () => {
 			basedOnMessageCount: 1,
 		};
 		daemon.observeRosterEvent(state, { type: "session_status", activeSessionId: "finished" });
-		await new Promise((resolve) => setImmediate(resolve));
-
-		expect(sentDeltas.at(-1)?.entries.map((entry) => entry.summary.activity)).toEqual(["idle"]);
+		await vi.waitFor(() => {
+			expect(sentDeltas.at(-1)?.entries.map((entry) => entry.summary.activity)).toEqual(["idle"]);
+		});
 	});
 
 	it("flushes cron and model changes that have no session-event carrier", async () => {

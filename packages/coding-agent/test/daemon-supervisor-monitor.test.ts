@@ -2096,12 +2096,14 @@ describe("daemon worker supervisor monitoring", () => {
 		};
 		const workers = new Map([[worker.descriptor.workerId, worker]]);
 		const recoverUncertainWorkerOperations = vi.fn(async () => {});
+		const releaseWorkerRlmCapacity = vi.fn();
 		const deleteWorkerDescriptor = vi.fn();
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			workers,
 			sessionInputPauses: new Map(),
 			processIdentity: vi.fn(() => "gone"),
 			recoverUncertainWorkerOperations,
+			releaseWorkerRlmCapacity,
 			deleteWorkerDescriptor,
 		}) as {
 			reclaimStaleWorkerRegistration(target: typeof worker): Promise<boolean>;
@@ -2109,6 +2111,7 @@ describe("daemon worker supervisor monitoring", () => {
 
 		await expect(supervisor.reclaimStaleWorkerRegistration(worker)).resolves.toBe(true);
 		expect(recoverUncertainWorkerOperations).toHaveBeenCalledWith(worker);
+		expect(releaseWorkerRlmCapacity).toHaveBeenCalledWith(worker);
 		expect(deleteWorkerDescriptor).toHaveBeenCalledWith(worker);
 		expect(workers.has(worker.descriptor.workerId)).toBe(false);
 	});

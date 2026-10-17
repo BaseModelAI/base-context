@@ -37,7 +37,10 @@ describe("goal reminder progress", () => {
 			persistSession: true,
 			tools: [ipython],
 			models: [{ id: "faux-1", contextWindow: 10_000 }],
-			settings: { compaction: { enabled: true, reserveTokens: 8_000, keepRecentTokens: 1 } },
+			settings: {
+				compaction: { enabled: true, reserveTokens: 8_000, keepRecentTokens: 1 },
+				autoRefine: { enabled: false },
+			},
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_compact", async (event) => ({

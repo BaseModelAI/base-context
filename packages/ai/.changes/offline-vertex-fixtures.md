@@ -1,0 +1,1 @@
+- Fixed offline Google Vertex API-key and thinking-budget tests to match the client transport interface.

@@ -1956,10 +1956,11 @@ describe("daemon mode helpers", () => {
 			});
 		});
 		const previousSupervisorSocket = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		let daemon: AgentDaemon | undefined;
 		try {
 			await new Promise<void>((resolve) => server.listen(socketPath, resolve));
 			process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = socketPath;
-			const daemon = new AgentDaemon("/tmp/prime-agent-worker-test.sock", {
+			daemon = new AgentDaemon("/tmp/prime-agent-worker-test.sock", {
 				defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
 				createRuntime: async () => {
 					throw new Error("unexpected runtime creation");
@@ -1981,6 +1982,7 @@ describe("daemon mode helpers", () => {
 			);
 			expect(connectionCount).toBe(1);
 		} finally {
+			closeFixtureSupervisorLink(daemon);
 			if (previousSupervisorSocket === undefined) {
 				delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
 			} else {
@@ -2110,13 +2112,14 @@ describe("daemon mode helpers", () => {
 			});
 		});
 		const previousSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		let daemon: AgentDaemon | undefined;
 		try {
 			await new Promise<void>((resolve, reject) => {
 				server.once("error", reject);
 				server.listen(socketPath, resolve);
 			});
 			process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = socketPath;
-			const daemon = new AgentDaemon(join(tempDir, "worker.sock"), {
+			daemon = new AgentDaemon(join(tempDir, "worker.sock"), {
 				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
 				createRuntime: vi.fn(),
 				worker: { authenticationToken: "token" },
@@ -2145,6 +2148,7 @@ describe("daemon mode helpers", () => {
 			releaseResponse();
 			await expect(rename).resolves.toBeUndefined();
 		} finally {
+			closeFixtureSupervisorLink(daemon);
 			if (previousSocketPath === undefined) delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
 			else process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSocketPath;
 			await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -2179,13 +2183,14 @@ describe("daemon mode helpers", () => {
 			});
 		});
 		const previousSocketPath = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		let daemon: AgentDaemon | undefined;
 		try {
 			await new Promise<void>((resolve, reject) => {
 				server.once("error", reject);
 				server.listen(socketPath, resolve);
 			});
 			process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = socketPath;
-			const daemon = new AgentDaemon(join(tempDir, "worker.sock"), {
+			daemon = new AgentDaemon(join(tempDir, "worker.sock"), {
 				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
 				createRuntime: vi.fn(),
 			});
@@ -2203,6 +2208,7 @@ describe("daemon mode helpers", () => {
 			);
 			expect(requestCount).toBe(1);
 		} finally {
+			closeFixtureSupervisorLink(daemon);
 			if (previousSocketPath === undefined) delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
 			else process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSocketPath;
 			await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -2210,25 +2216,28 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	it("delivers only a child-result capsule and recovers its report after sender disposal and recipient reopen", async () => {
+	it("keeps corrective and unresolved child capsules and recovers reports after sender disposal and recipient reopen", async () => {
 		const { parent, child, parentState, childState, internals, controller } = await makeAgentResultDaemonFixture();
 		let reopened: SessionManager | undefined;
 		try {
 			const selectedLine = "  capsulereportmarker3: preserve the final newline and the original indentation.";
 			const findings = `# Latest parser findings\n\n${selectedLine}\n\n${"Observed parser output, not a verified outcome.\n".repeat(200)}`;
 			const reports = [
-				"capsulereportmarker1: initial parser notes\n".repeat(200),
-				"capsulereportmarker2: revised parser notes\n".repeat(200),
+				"capsulereportmarker1: public API loses an item; locale handling is unresolved.\n".repeat(200),
+				"capsulereportmarker2: loss occurs only after reset; locale handling is still unresolved.\n".repeat(200),
 				findings,
 			];
 			const receipts: AgentSessionMessageReceipt[] = [];
 			const providerMessages: string[] = [];
+			const summaries: string[] = [];
 			let summary = "";
 			for (const [index, report] of reports.entries()) {
-				summary =
-					index === 2
-						? `Parser investigation complete. Supersedes reports ${receipts.map((receipt) => receipt.resultRef!.ref).join(", ")}; read only this latest report's relevant lines.`
-						: `Parser investigation update ${index + 1}; details are available in the report.`;
+				summary = [
+					"Public API loses an item; locale handling is unresolved.",
+					`Correction to ${receipts[0]?.resultRef?.ref}: loss occurs only after reset. Locale handling is still unresolved.`,
+					`Ordinary calls pass. The reset defect and locale caveat from ${receipts.map((receipt) => receipt.resultRef!.ref).join(", ")} remain unresolved.`,
+				][index]!;
+				summaries.push(summary);
 				parent.appendResponses([
 					(context) => {
 						providerMessages.push(JSON.stringify(context.messages));
@@ -2255,7 +2264,10 @@ describe("daemon mode helpers", () => {
 			expect(receipt.message).toContain(reference.ref);
 			expect(JSON.stringify(receipts)).not.toContain("capsulereportmarker");
 			expect(providerMessages).toHaveLength(3);
-			expect(providerMessages[2]).toContain(summary);
+			for (const [index, earlierSummary] of summaries.entries()) {
+				expect(providerMessages[2]).toContain(earlierSummary);
+				expect(providerMessages[2]).toContain(receipts[index]!.resultRef!.ref);
+			}
 			expect(providerMessages.every((messages) => !messages.includes("capsulereportmarker"))).toBe(true);
 			expect(JSON.stringify(parent.session.messages)).not.toContain("capsulereportmarker");
 			expect(
@@ -2314,7 +2326,10 @@ describe("daemon mode helpers", () => {
 				expect.objectContaining({ ...reference, startLine: 3, endLine: 3, text: selectedLine }),
 			]);
 			const context = buildSessionContext(await reopened.readBranch(), reopened.getLeafId());
-			expect(JSON.stringify(context.messages)).toContain(summary);
+			for (const [index, earlierSummary] of summaries.entries()) {
+				expect(JSON.stringify(context.messages)).toContain(earlierSummary);
+				expect(JSON.stringify(context.messages)).toContain(receipts[index]!.resultRef!.ref);
+			}
 			expect(JSON.stringify(context.messages)).not.toContain("capsulereportmarker");
 		} finally {
 			await reopened?.close();
@@ -9469,6 +9484,10 @@ describe("daemon mode helpers", () => {
 		).rejects.toThrow("Unknown active session: missing");
 	});
 });
+
+function closeFixtureSupervisorLink(daemon: AgentDaemon | undefined): void {
+	(daemon as unknown as { supervisorLink?: { close(): void } } | undefined)?.supervisorLink?.close();
+}
 
 const fixtureSessions = new Set<SessionManager>();
 const fixtureHarnesses = new Set<Awaited<ReturnType<typeof createHarness>>>();

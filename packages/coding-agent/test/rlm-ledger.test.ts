@@ -1579,8 +1579,8 @@ describe("rlm spawn ledger supervisor wiring", () => {
 			if (!missingRow || !existingRow) throw new Error("Missing seeded roster rows");
 			supervisor.roster().delete(missingRow.agentId);
 			supervisor.roster().write(existingRow, "worker-1");
-			const source = {};
-			const replacement = {};
+			const source = { supportsServerCapability: () => false };
+			const replacement = { supportsServerCapability: () => false };
 			const worker = {
 				descriptor: { workerId: "worker-1", sessionFile: parentFile, createCommand: {} },
 				client: source,

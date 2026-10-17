@@ -84,7 +84,10 @@ function createHarness() {
 		}
 		return { type: "response", command: command.type, success: true } satisfies DaemonResponse;
 	});
-	supervisor.attachClient = vi.fn(async () => ({ worker, result: { activeSessionId: "active-1" } }));
+	supervisor.attachClient = vi.fn(async () => ({
+		worker,
+		result: { activeSessionId: "active-1", client: { capabilities: [] } },
+	}));
 	supervisor.reserveSnapshotStream = vi.fn(() => vi.fn());
 	supervisor.write = vi.fn();
 	supervisor.detachClient = vi.fn((client: ClientFixture, activeSessionId?: string) => {

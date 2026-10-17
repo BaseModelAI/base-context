@@ -24,12 +24,36 @@ included section, fields are required unless marked optional below.
 | --- | --- |
 | `rules`, `hard_bounds`, `targets`, `references`, `assumptions` | Lists of strings |
 | `output_meanings` | Map of output names to string meanings, including units and rounding when relevant |
+| `stages` | List of named interfaces: `name`: string; `input_meanings` and `output_meanings`: maps of names to string meanings; optional `assumptions`: list of strings |
 | `objective` | `components`: ordered list of strings; `direction`: `maximize` or `minimize`; optional `target`: string; `work_limit`: positive safe integer |
 | `delivery` | `workspace`: string; optional `consumer_root` and `mode`: strings; `files`: list of `{path, dependencies?}` with string paths and optional lists of string dependencies |
 | `integration_owner`, `activation_owner` | Strings naming responsible agents or people, not granting permission |
-| `boundary_case` | `description`: string; optional `command`: string |
+| `boundary_case` | `description`: string; optional `command`, `expected_behavior`, `consumer`, `runtime`, and `cwd`: strings |
 
-For example, a file task might need only delivery and boundary information:
+Use `stages` only when a task crosses interfaces whose meanings matter. For
+example, a table conversion could declare:
+
+```python
+contract = {
+    "stages": [
+        {"name": "read rows",
+         "input_meanings": {"table": "UTF-8 CSV; identifiers are strings"},
+         "output_meanings": {"rows": "Rows in source order; retain leading zeros"},
+         "assumptions": ["The supplied delimiter is correct"]},
+        {"name": "write report",
+         "input_meanings": {"rows": "Rows in source order; identifiers unchanged"},
+         "output_meanings": {"report": "One JSON object per row, not a summary"}},
+    ],
+}
+```
+
+These are descriptive interfaces, not a required sequence of reviews or a new
+execution workflow. Preserve each meaning and assumption literally. Do not
+promote a stage assumption or a desired target to a hard rule. Names and values
+are task-supplied text; the runtime does not interpret them or infer missing
+stages. A contract can omit stages entirely.
+
+A file task might need only delivery and boundary information:
 
 ```python
 child = await rlm(
@@ -44,15 +68,31 @@ child = await rlm(
                       {"path": "helpers.py"}],
         },
         "integration_owner": "parent",
-        "boundary_case": {"description": "Run the CLI with empty input from the consumer root."},
+        "boundary_case": {
+            "description": "Empty input through the consumer CLI",
+            "command": ".venv/bin/python cli.py empty.json",
+            "expected_behavior": "Exit 0 and write an empty JSON array",
+            "consumer": "Transferred CLI files, not the development workspace",
+            "runtime": "Consumer project's .venv Python",
+            "cwd": "/srv/consumer",
+        },
     },
 )
 ```
 
-`boundary_case.command` is descriptive. It does not execute a command or grant
-permission to run one. If testing is warranted, select one relevant
-public-interface or state-boundary edge within the task's existing test budget.
-Do not add an indiscriminate test suite.
+Every `boundary_case` field is descriptive. Neither a command nor an expected
+behavior executes anything, grants permission, or establishes a passing result.
+`consumer` identifies the actual consumer representation or interface; `runtime`
+names its environment or interpreter; `cwd` records its working directory. These
+fields do not select a runtime, change directories, or stage files. Supply only
+known context, not the REPL environment or a guessed path. Missing fields remain
+unknown.
+
+For an already-authorized check, compare the observed behavior with
+`expected_behavior` at the declared consumer boundary. A workspace-only result
+cannot establish behavior in a different consumer/runtime/cwd. If testing is
+warranted, select a relevant public-interface or state-boundary edge within the
+task's existing test budget. Do not add an indiscriminate test suite.
 
 ## Separate observations from conclusions
 

@@ -356,7 +356,7 @@ describe("ReplKernelManager abort handling", () => {
 		expect(cleanupResources).toHaveBeenCalledOnce();
 	});
 
-	it("rejects an execution whose re-bootstrap wait crossed the start of the final flush", async () => {
+	it("rejects an execution waiting for re-bootstrap when shutdown skips the unready snapshot", async () => {
 		const manager = new ReplKernelManager({
 			cwd: process.cwd(),
 			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
@@ -405,17 +405,16 @@ describe("ReplKernelManager abort handling", () => {
 		await waitForCalls(executeInner, 1);
 		expect(calls).toEqual(["bootstrap"]);
 
-		// The teardown's final flush starts while the cell is still parked.
+		// A pending re-bootstrap must not overwrite the saved namespace.
 		const teardown = manager.shutdown({ snapshot: true });
 		await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
 		releaseBootstrap();
 
-		// Un-bootstrapped no more, the cell must NOT splice between the flush's
-		// captured queue and the final snapshot; the guard re-check rejects it.
-		await expect(cell).rejects.toThrow("Kernel is shutting down");
+		// Shutdown retires this generation without a snapshot or the user cell.
+		await expect(cell).rejects.toThrow("Kernel has been shut down");
 		releaseSnapshot();
 		await expect(teardown).resolves.toBe(true);
-		expect(calls).toEqual(["bootstrap", "snapshot"]);
+		expect(calls).toEqual(["bootstrap"]);
 	});
 
 	it("settles an aborted execution promptly while the lazy re-bootstrap is still running", async () => {
@@ -562,6 +561,7 @@ describe("ReplKernelManager abort handling", () => {
 		const killSignals: (NodeJS.Signals | number | undefined)[] = [];
 		internals.child = {
 			kill: (signal?: NodeJS.Signals | number) => {
+				expect(writeLine.mock.calls.some(([request]) => request.type === "shutdown")).toBe(true);
 				killSignals.push(signal);
 				return true;
 			},
@@ -572,7 +572,7 @@ describe("ReplKernelManager abort handling", () => {
 		await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		const types = writeLine.mock.calls.map((call) => (call[0] as { type?: string }).type);
 		expect(types).toContain("shutdown");
-		expect(killSignals).toContain("SIGTERM");
+		expect(killSignals).toEqual(["SIGKILL"]);
 	});
 
 	it("drops stale between-cell background output on kernel teardown", async () => {

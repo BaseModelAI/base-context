@@ -115,7 +115,14 @@ it("recovers a large Python result and its old constraint after compaction and c
 							type: "toolCall",
 							id: "recover-large-output",
 							name: "prime_context",
-							arguments: { action: "read", ref: output.id, startLine: 251, endLine: 251 },
+							arguments: {
+								action: "read",
+								ref: output.id,
+								field: "/message/content/0/text",
+								// Retained output starts with the [stdout] heading before row 0.
+								startLine: 252,
+								endLine: 252,
+							},
 						},
 					],
 					{ stopReason: "toolUse" },

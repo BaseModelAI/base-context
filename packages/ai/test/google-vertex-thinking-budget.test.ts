@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("@google/genai", async (importOriginal) => {
 	const actual = await importOriginal<typeof GoogleGenAi>();
 	class GoogleGenAI {
+		apiClient = { apiCall: vi.fn<typeof fetch>() };
 		models = {
 			generateContentStream: async function* () {
 				yield {

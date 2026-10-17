@@ -111,7 +111,11 @@ async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
     ``thinking`` sets the child reasoning level (e.g. 'off', 'low', 'medium', 'high');
     defaults to the parent level; levels invalid for the resolved model fail the spawn.
     ``task_contract`` is an optional structured brief, validated by the host before
-    admission and kept distinct from native user instructions.
+    admission and kept distinct from native user instructions. Optional ``stages``
+    name interfaces with ``input_meanings``, ``output_meanings``, and optional
+    ``assumptions``. ``boundary_case`` can describe ``expected_behavior`` and the
+    ``consumer``, ``runtime``, and ``cwd`` for an already-authorized check. These
+    fields describe the task; they do not execute commands or grant permission.
     """
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")

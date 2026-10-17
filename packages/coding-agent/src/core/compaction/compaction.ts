@@ -564,6 +564,9 @@ Keep each section concise. Preserve exact file paths, function names, and error 
 const BINDING_REQUIREMENTS_SUMMARY_NOTE =
 	"Preserve still-binding user requirements and constraints with their original force, scope, and conditions, subject to higher-priority instructions. Keep them binding until a later user instruction changes or withdraws them; progress or assistant suggestions alone do not change them. Record them as constraints, not merely as past decisions or optional suggestions. Distinguish settled decisions from unaccepted recommendations, and do not invent new recommendations. Never instruct the next assistant to relax still-binding constraints.";
 
+const CONTRARY_EVIDENCE_SUMMARY_NOTE =
+	"Preserve unresolved contrary evidence, reproduced defects, corrected premises, and explicit caveats, with their source or report references. Keep observations separate from interpretations and child-reported claims. A newer report or narrower assistant brief does not by itself resolve a conflict. Record a resolution only when the conversation supports it against the user request; otherwise retain the uncertainty.";
+
 const RUNTIME_STATE_SUMMARY_NOTE =
 	"Runtime note: this summary does not establish whether a Python kernel is live or whether its variables, imports, helpers, or jobs remain available. Preserve useful names and their last observed state, including uncertainty. Use current runtime reports before relying on them; do not infer either survival or loss from compaction.";
 
@@ -615,7 +618,7 @@ export function buildSummarizationPrompt(customInstructions?: string, previousSu
 		previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT,
 		customInstructions,
 	);
-	return `${basePrompt}\n\n${BINDING_REQUIREMENTS_SUMMARY_NOTE}\n\n${RUNTIME_STATE_SUMMARY_NOTE}`;
+	return `${basePrompt}\n\n${BINDING_REQUIREMENTS_SUMMARY_NOTE}\n\n${CONTRARY_EVIDENCE_SUMMARY_NOTE}\n\n${RUNTIME_STATE_SUMMARY_NOTE}`;
 }
 
 function appendSummaryInstructions(prompt: string, customInstructions?: string): string {
@@ -945,7 +948,9 @@ Summarize the prefix to provide context for the retained suffix:
 
 Be concise. Focus on what's needed to understand the kept suffix.
 
-${BINDING_REQUIREMENTS_SUMMARY_NOTE}`;
+${BINDING_REQUIREMENTS_SUMMARY_NOTE}
+
+${CONTRARY_EVIDENCE_SUMMARY_NOTE}`;
 
 /**
  * Generate summaries for compaction using prepared data.

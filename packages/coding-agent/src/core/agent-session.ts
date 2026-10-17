@@ -2027,13 +2027,24 @@ export class AgentSession {
 		let failure: unknown;
 		let primaryCause: unknown;
 		try {
-			const messages = await captured.readHistory((view) =>
-				this._contextCompiler.compile(view, limits, undefined, {}, resource, this._initialContextMode),
-			);
-			const context = getCanonicalEpochContext(messages)!;
-			if (context.checkpoint && contextEpochMode(context.checkpoint, this._initialContextMode) === mode) {
+			const acceptedMode = await captured.readHistory(async (view) => {
+				const { summaryRef } = await view.contextManifest({ limit: 1 });
+				if (!summaryRef) return undefined;
+				const metadata = await view.get(summaryRef.entryId);
+				if (metadata?.qualification !== "native-context-epoch" || metadata.retention === "retained-import")
+					return undefined;
+				const hydrated = await hydrateCapturedHistoryEntry(metadata, limits.maxSourceBytes, view.readPayload);
+				if (hydrated?.entry.type !== "compaction") return undefined;
+				const checkpoint = readContextEpoch(hydrated.entry.details, limits.maxSourceBytes);
+				return checkpoint ? contextEpochMode(checkpoint, this._initialContextMode) : undefined;
+			});
+			if (acceptedMode === mode) {
+				// An unchanged policy does not admit a request or transform an interrupted tool group.
 				this._contextMode = mode;
 			} else {
+				const messages = await captured.readHistory((view) =>
+					this._contextCompiler.compile(view, limits, undefined, {}, resource, this._initialContextMode),
+				);
 				const prepared = prepareContextModeEpoch(messages, mode, limits.maxSourceBytes, freshContextContract);
 				assertResourceCurrent(resource);
 				const entryId = await compaction[appendContextEpoch](prepared.checkpoint, null);
