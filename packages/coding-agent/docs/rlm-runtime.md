@@ -184,7 +184,7 @@ test_review = await rlm("review the tests", name="test-reviewer")
 audit = await rlm("slow independent audit", name="audit-reviewer")
 ```
 
-End the turn instead of waiting for completion. Use `agent_message.send` for short coordination and `await agent_message.send_result(summary, findings, receiver_role="parent")` for substantial findings or final reports. Replies arrive over later turns; recover capsule details only when needed. Include decisive contrary evidence and corrective caveats in the summary or `outcome`, not only archived findings. Keep unresolved evidence and its report references in parent decisions until resolved against the user request; a newer report does not automatically replace it. Without that capability, use files for fan-in. The host runs each admitted child as an independent `AgentSession`; daemon-backed children can be retained as independently addressable session workers.
+End the turn instead of waiting for completion. Use `agent_message.send` for short coordination and `await agent_message.send_result(summary, findings, receiver_role="parent")` for substantial findings or final reports. Replies arrive over later turns; recover capsule details only when needed. Without that capability, use files for fan-in. The host runs each admitted child as an independent `AgentSession`; daemon-backed children can be retained as independently addressable session workers.
 
 ## Parent-Scoped Sub-Agent Registry
 
@@ -192,7 +192,7 @@ The TypeScript parent maintains the authoritative direct-child registry. `await 
 
 This registry survives kernel restart, compaction, and parent restore. Successfully completed daemon-backed children are rehydrated from the parent artifact registry. Inline children remain inspectable in the current process but have no active-session ID.
 
-The parent can continue a retained daemon child with `await agent_message.send(..., receiver_role="child", receiver_name=child.session_name)`. `rlm.delete_subagent()` accepts an exact child ID, active-session ID, session ID, or unique name. Deletion cancels or closes the runtime, writes a durable tombstone, removes the child from messaging and observation, and cleans up child runtime artifacts. Deleting a busy child can discard an unsent correction. For routine cleanup, first receive the requested result and observe idle; a delivered or queued message receipt is not completion. Intentional cancellation remains allowed and should be reported as cancellation, not completed work. Reports already archived in the recipient remain subject to that session's retention and branch scope.
+The parent can continue a retained daemon child with `await agent_message.send(..., receiver_role="child", receiver_name=child.session_name)`. `rlm.delete_subagent()` accepts an exact child ID, active-session ID, session ID, or unique name. Deletion cancels or closes the runtime, writes a durable tombstone, and removes the child from messaging and observation. It does not erase the transcript or artifacts on disk.
 
 Registry scope follows the parent transcript. An unrelated new parent session does not inherit children.
 

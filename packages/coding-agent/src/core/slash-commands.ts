@@ -10,7 +10,7 @@ export interface SlashCommandInfo {
 	sourceInfo: SourceInfo;
 }
 
-export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "goal", "autonomous"] as const;
+export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "goal", "autonomous", "continuation"] as const;
 
 export type SessionSlashCommandName = (typeof SESSION_SLASH_COMMAND_NAMES)[number];
 
@@ -169,6 +169,12 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		name: "autonomous",
 		description: "Set or view autonomous mode",
 		argumentHint: "[status|on|off]",
+		takesArgument: true,
+	},
+	{
+		name: "continuation",
+		description: "View, block, or resume automatic continuation",
+		argumentHint: "[status|resume|block <reason>]",
 		takesArgument: true,
 	},
 	{

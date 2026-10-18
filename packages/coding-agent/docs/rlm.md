@@ -102,7 +102,7 @@ receipt = await agent_message.send_result(
 
 The recipient stores the full public report in its own session before receiving the capsule. The report is not added to the recipient's model context. The capsule and `receipt["resultRef"]` identify the retained source, entry and findings field. The recipient can use the existing `prime_context` read/search operations (or `rlm.prime_context` in an active kernel call) to request selected lines or search for a relevant section. The report remains available after the child runtime stops, within normal recipient-session retention and branch scope.
 
-Capsules are child-authored conclusions, not verified facts. Put decisive contrary evidence, corrected premises, material caveats, unresolved decisions and observed artifact changes in the summary or `outcome`, not only the archived findings. Identify earlier report refs that the capsule revises or replaces. A parent should read the capsules first and retrieve relevant report sections; a newer message does not automatically replace independent findings or unresolved blockers. Keep unresolved evidence and its references in current decisions and final briefs until resolved against the user request. A narrower brief or more favorable report is not itself a resolution. Older reports remain readable.
+Capsules are child-authored conclusions, not verified facts. Include material caveats, unresolved decisions and observed artifact changes. Identify earlier report refs that the capsule revises or replaces. A parent should read the capsules first and retrieve only the latest relevant report sections; a newer message does not automatically replace independent findings or unresolved blockers. Older reports remain readable.
 
 Summaries must fit 2,000 characters. The complete encoded report uses the existing native source size limit; oversize reports refuse instead of being clipped. This operation adds no summarization-model call. Ordinary short questions and progress messages stay inline:
 
@@ -132,13 +132,11 @@ for child in children:
     print(child.session_name, child.status, child.active_session_id)
 ```
 
-Successfully completed daemon-backed children remain addressable while their parent session is open. For routine cleanup, receive the requested result, observe idle, and delete the child when its context is no longer needed:
+Successfully completed daemon-backed children remain addressable while their parent session is open. Delete a child only when its context is no longer needed:
 
 ```python
 await rlm.delete_subagent(children[0])
 ```
-
-Deleting a busy child cancels active work and can discard an unsent correction. A delivered or queued `agent_message.send` receipt does not establish that the follow-up finished. Intentional cancellation remains available; report it as cancellation, not completed work. Reports already archived in the parent remain available under the parent's normal retention and branch scope.
 
 The default maximum recursion depth is `2`, with the root at depth `0`. The host enforces the accepted session limit. See [recursive-agent settings](settings.md#recursive-agents) for the global creation default.
 

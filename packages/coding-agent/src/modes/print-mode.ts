@@ -13,7 +13,11 @@ import { flushRawStdout, writeRawStdout } from "../core/output-guard.js";
 import { killTrackedDetachedChildren } from "../utils/shell.js";
 import { InProcessAgentConnection } from "./agent-connection/in-process-agent-connection.js";
 import type { AgentConnection, AgentConnectionSessionEvent } from "./agent-connection/types.js";
-import { latestAutonomousGateAttempt, selectHeadlessTerminalResult } from "./headless-completion.js";
+import {
+	HeadlessContinuationBlockedError,
+	latestAutonomousGateAttempt,
+	selectHeadlessTerminalResult,
+} from "./headless-completion.js";
 
 /**
  * Options for print mode.
@@ -145,7 +149,14 @@ async function runPrintModeWithConnectionInternal(
 			await connection.promptAndWait(message);
 		}
 
-		const autonomousStatus = await connection.waitForHeadlessCompletion({ waitForRlmQuiescence: true });
+		const autonomousStatus = await connection
+			.waitForHeadlessCompletion({ waitForRlmQuiescence: true })
+			.catch((error: unknown) => {
+				if (!(error instanceof HeadlessContinuationBlockedError)) throw error;
+				console.error(error.message);
+				exitCode = 1;
+				return undefined;
+			});
 		const { primary, compactionOutcomes } = selectHeadlessTerminalResult(await connection.getMessages());
 		if (primary?.role === "assistant") {
 			if (primary.stopReason === "error" || primary.stopReason === "aborted") {
@@ -167,6 +178,7 @@ async function runPrintModeWithConnectionInternal(
 			if (outcome.details.outcome === "failed") exitCode = 1;
 		}
 
+		if (!autonomousStatus) return exitCode;
 		const autonomousLimit = autonomousLimitReason(autonomousStatus);
 		if (autonomousStatus.enabled && autonomousStatus.gates.commands.length > 0 && autonomousStatus.lastGateFailure) {
 			const limitText = autonomousLimit

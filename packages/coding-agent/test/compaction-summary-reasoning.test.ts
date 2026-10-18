@@ -254,54 +254,6 @@ describe("generateSummary reasoning options", () => {
 		expect(prompt).toContain("Never instruct the next assistant to relax still-binding constraints");
 	});
 
-	it.each(["initial", "update", "split"] as const)(
-		"keeps contrary child evidence and its references in %s compaction input",
-		async (mode) => {
-			const initial =
-				"Child report: public API loses an item; locale handling is unresolved. Report ref: initial-report.";
-			const correction =
-				"Child correction: the loss occurs only after reset. Locale handling is still unresolved. Report ref: corrected-report.";
-			const later = "Child report: ordinary calls pass. Report ref: later-report.";
-			const evidence: AgentMessage[] = (mode === "update" ? [correction, later] : [initial, correction, later]).map(
-				(content, timestamp) => ({
-					role: "custom",
-					customType: "agent_message",
-					content,
-					display: true,
-					timestamp,
-				}),
-			);
-			const previousSummary = mode === "update" ? `## Critical Context\n${initial}` : undefined;
-			await compact(
-				{
-					firstKeptEntryId: "kept",
-					messagesToSummarize: mode === "split" ? [] : evidence,
-					turnPrefixMessages: mode === "split" ? evidence : [],
-					isSplitTurn: mode === "split",
-					previousSummary,
-					tokensBefore: 90_000,
-					fileOps: createFileOps(),
-					settings: { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 },
-				},
-				createModel(false),
-				"test-key",
-			);
-
-			expect(completeSimpleMock).toHaveBeenCalledTimes(1);
-			const text: string = completeSimpleMock.mock.calls[0][1].messages[0].content[0].text;
-			for (const report of [initial, correction, later]) expect(text).toContain(report);
-			if (previousSummary) expect(text).toContain(`<previous-summary>\n${previousSummary}\n</previous-summary>`);
-			expect(text).toContain(
-				"Preserve unresolved contrary evidence, reproduced defects, corrected premises, and explicit caveats",
-			);
-			expect(text).toContain("with their source or report references");
-			expect(text).toContain("Keep observations separate from interpretations and child-reported claims");
-			expect(text).toContain("A newer report or narrower assistant brief does not by itself resolve a conflict");
-			expect(text).toContain("Record a resolution only when the conversation supports it against the user request");
-			expect(text).toContain("otherwise retain the uncertainty");
-		},
-	);
-
 	it("keeps a previous checkpoint when all new summarized messages belong to the split turn", async () => {
 		completeSimpleMock.mockResolvedValueOnce({
 			...mockSummaryResponse,

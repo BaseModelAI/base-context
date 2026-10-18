@@ -23,6 +23,7 @@ import {
 	isDaemonMutatingCommand,
 	meetsDaemonCommandCompatibility,
 	NATIVE_WORK_COMPATIBILITIES,
+	SESSION_CREATE_PROGRESS_COMPATIBILITY,
 } from "./daemon-protocol.js";
 import {
 	DAEMON_WORKER_COMMAND_COMPATIBILITY,
@@ -58,6 +59,7 @@ interface PendingDaemonRequest {
 	timeoutMs: number;
 	startedAt: number;
 	commandType: string;
+	startupProgress?: Extract<DaemonRequestProgress, { type: "session_create_progress" }>;
 	onProgress?: DaemonClientProgressListener;
 	wireData: string;
 	awaitingReconnect: boolean;
@@ -386,6 +388,9 @@ export class DaemonClient {
 			);
 		}
 		const hello = this.helloMessage ?? (await this.waitForHello(3000, signal));
+		if (command.type === "create" && meetsDaemonCommandCompatibility(hello, SESSION_CREATE_PROGRESS_COMPATIBILITY)) {
+			command = { ...command, startupProgress: command.startupProgress ?? true };
+		}
 		const compatibilities = getDaemonCommandCompatibilities(command);
 		const missingCompatibility = compatibilities.find(
 			(compatibility) => !meetsDaemonCommandCompatibility(hello, compatibility),
@@ -513,7 +518,12 @@ export class DaemonClient {
 			}
 			this.pendingRequests.delete(id);
 			const elapsedMs = Math.max(0, Date.now() - pending.startedAt);
-			const startupDetails = pending.commandType === "create" ? " lastStartupPhase: unknown." : "";
+			const startupDetails =
+				pending.commandType === "create"
+					? pending.startupProgress
+						? ` lastStartupPhase: ${pending.startupProgress.startupPhase}; startupPhaseObservedAt: ${pending.startupProgress.observedAt}.`
+						: " lastStartupPhase: unknown."
+					: "";
 			pending.reject(
 				new Error(
 					`Timed out after ${elapsedMs}ms waiting for the Base Context daemon response to "${pending.commandType}". Request ID: ${id}; elapsedMs: ${elapsedMs}.${startupDetails} ${daemonEndpointDetails(this.socketPath)}`,
@@ -580,6 +590,18 @@ export class DaemonClient {
 						continue;
 					}
 					pending.awaitingReconnect = false;
+					const wire = JSON.parse(pending.wireData) as DaemonCommandEnvelope;
+					if (
+						wire.type === "command" &&
+						wire.command.type === "create" &&
+						wire.command.startupProgress !== undefined &&
+						!meetsDaemonCommandCompatibility(message, SESSION_CREATE_PROGRESS_COMPATIBILITY)
+					) {
+						const { startupProgress: _startupProgress, ...command } = wire.command;
+						wire.command = command;
+						pending.compatibilities = getDaemonCommandCompatibilities(command);
+						pending.wireData = serializeJsonLine(wire);
+					}
 					const missingCompatibility = pending.compatibilities.find(
 						(compatibility) => !meetsDaemonCommandCompatibility(message, compatibility),
 					);
@@ -595,7 +617,6 @@ export class DaemonClient {
 						continue;
 					}
 					// Only passive reads survive a downgrade to Base8/Base9/Base10; retain identity and negotiate the envelope.
-					const wire = JSON.parse(pending.wireData) as DaemonCommandEnvelope;
 					if (wire.type === "command" && wire.protocol.version !== message.protocol.version) {
 						wire.protocol.version = message.protocol.version;
 						pending.wireData = serializeJsonLine(wire);
@@ -625,7 +646,10 @@ export class DaemonClient {
 		}
 		if (isDaemonRequestProgress(message) && message.id) {
 			const pending = this.pendingRequests.get(message.id);
-			if (pending) {
+			if (pending && pending.commandType === message.command) {
+				if (message.type === "session_create_progress") {
+					pending.startupProgress = message;
+				}
 				pending.onProgress?.(message);
 				return;
 			}
@@ -794,7 +818,20 @@ function isDaemonRequestProgress(value: unknown): value is DaemonRequestProgress
 		loaded?: unknown;
 		total?: unknown;
 		session?: unknown;
+		startupPhase?: unknown;
+		observedAt?: unknown;
 	};
+	if (candidate.type === "session_create_progress") {
+		return (
+			candidate.command === "create" &&
+			typeof candidate.id === "string" &&
+			(candidate.startupPhase === "admission" ||
+				candidate.startupPhase === "spawn" ||
+				candidate.startupPhase === "handshake" ||
+				candidate.startupPhase === "session-open") &&
+			typeof candidate.observedAt === "string"
+		);
+	}
 	if (candidate.command !== "list_saved_sessions" || typeof candidate.id !== "string") {
 		return false;
 	}

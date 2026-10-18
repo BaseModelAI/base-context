@@ -202,6 +202,19 @@ describe("slash command aliases", () => {
 });
 
 describe("session slash commands", () => {
+	test("routes explicit continuation controls and rejects multiline input", () => {
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "continuation")).toMatchObject({
+			execution: "session",
+			argumentHint: "[status|resume|block <reason>]",
+			takesArgument: true,
+		});
+		for (const args of ["status", "resume", "block required input unavailable"]) {
+			const text = `/continuation ${args}`;
+			expect(parseSessionSlashCommand(text)).toEqual({ name: "continuation", args, text });
+		}
+		expect(parseSessionSlashCommand("/continuation block missing\ninput")).toBeUndefined();
+	});
+
 	test("keeps the authoritative names and built-in execution metadata in sync", () => {
 		expect(
 			BUILTIN_SLASH_COMMANDS.filter((command) => command.execution === "session").map((command) => command.name),

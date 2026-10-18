@@ -1,0 +1,6 @@
+- Changed the default prompts and task guidance back to v1.1.11.
+- Added explicit continuation holds for external blockers without completing the active goal.
+- Added live autonomous gate replacement without resetting run budgets.
+- Fixed reopening sessions with pending tool continuations.
+- Fixed session catalog reads failing when an index worker exits before its final reply is read.
+- Improved session-creation timeouts to report the last observed startup phase when supported by the daemon.

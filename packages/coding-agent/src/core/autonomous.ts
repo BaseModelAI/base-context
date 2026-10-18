@@ -100,6 +100,7 @@ interface GitWorktreeSnapshot {
 interface AutonomousOperationOptions {
 	cwd?: string;
 	signal?: AbortSignal;
+	isCurrent?: () => boolean;
 }
 
 type GateFailure = AgentAutonomousGateFailure;
@@ -201,12 +202,12 @@ export async function nextAutonomousContinuation(
 	now = Date.now(),
 ): Promise<UserMessage | undefined> {
 	options.signal?.throwIfAborted();
-	if (!state.enabled) {
+	if (options.isCurrent?.() === false || !state.enabled) {
 		return undefined;
 	}
 	const decision = await shouldAutonomouslyContinue(state, message, options, now);
 	options.signal?.throwIfAborted();
-	if (!decision.shouldContinue) {
+	if (options.isCurrent?.() === false || !decision.shouldContinue) {
 		return undefined;
 	}
 	state.continuationsUsed++;
@@ -232,11 +233,17 @@ export async function shouldAutonomouslyContinue(
 	now = Date.now(),
 ): Promise<AutonomousDecision> {
 	options.signal?.throwIfAborted();
-	if (!state.enabled || message.stopReason === "error" || message.stopReason === "aborted") {
+	if (
+		options.isCurrent?.() === false ||
+		!state.enabled ||
+		message.stopReason === "error" ||
+		message.stopReason === "aborted"
+	) {
 		return { shouldContinue: false, reason: "not_needed" };
 	}
 	const gateResult = await refreshAutonomousQualityGates(state, options);
 	options.signal?.throwIfAborted();
+	if (options.isCurrent?.() === false) return { shouldContinue: false, reason: "not_needed" };
 	if (gateResult) {
 		if (gateResult === "passed") {
 			return { shouldContinue: false, reason: "not_needed" };
@@ -284,24 +291,27 @@ export async function refreshAutonomousQualityGates(
 	options: AutonomousOperationOptions = {},
 ): Promise<AutonomousGateResult | undefined> {
 	options.signal?.throwIfAborted();
-	if (!state.enabled || state.gates.commands.length === 0) {
+	if (options.isCurrent?.() === false || !state.enabled || state.gates.commands.length === 0) {
 		return undefined;
 	}
-	return await runAutonomousQualityGates(state, options.cwd, options.signal);
+	return await runAutonomousQualityGates(state, options.cwd, options.signal, options.isCurrent);
 }
 
 async function runAutonomousQualityGates(
 	state: AutonomousRuntimeState,
 	cwd: string | undefined,
 	signal: AbortSignal | undefined,
-): Promise<AutonomousGateResult> {
+	isCurrent?: () => boolean,
+): Promise<AutonomousGateResult | undefined> {
 	signal?.throwIfAborted();
+	if (isCurrent?.() === false) return undefined;
 	if (!cwd) {
 		return "failed";
 	}
 	for (const command of state.gates.commands) {
 		const currentSnapshot = await captureGitWorktreeSnapshot(cwd, signal);
 		signal?.throwIfAborted();
+		if (isCurrent?.() === false) return undefined;
 		if (
 			state.lastGateFailure?.command === command &&
 			state.lastGateFailureSnapshot &&
@@ -326,8 +336,10 @@ async function runAutonomousQualityGates(
 			signal,
 		});
 		signal?.throwIfAborted();
+		if (isCurrent?.() === false) return undefined;
 		const postRunSnapshot = await captureGitWorktreeSnapshot(cwd, signal);
 		signal?.throwIfAborted();
+		if (isCurrent?.() === false) return undefined;
 		if (result.status === 0 && !result.error && !result.timedOut) {
 			state.gateAttempts[command] = 0;
 			if (state.lastGateFailure?.command === command) {

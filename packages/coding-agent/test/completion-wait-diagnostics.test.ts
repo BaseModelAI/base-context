@@ -55,6 +55,8 @@ function completionSession(work: Promise<void>) {
 			observeCompletion(work, options?.signal),
 		),
 		getAutonomousStatus: vi.fn(() => status),
+		getAutonomousRevision: vi.fn(() => 0),
+		getContinuationStatus: vi.fn(() => ({ status: "ready" })),
 		getCompletionBlockers: vi.fn(() =>
 			AgentSession.prototype.getCompletionBlockers.call(fake as unknown as AgentSession),
 		),

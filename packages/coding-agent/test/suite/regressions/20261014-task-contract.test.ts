@@ -15,21 +15,6 @@ describe("delegated task contract context", () => {
 			rules: ["Keep the supplied serial field"],
 			assumptions: ["Do not infer the asset age"],
 			integration_owner: "parent",
-			stages: [
-				{
-					name: "read records",
-					input_meanings: { serial: "Source identifier as text" },
-					output_meanings: { serial: "Unchanged identifier, including leading zeros" },
-					assumptions: ["Source ordering is intentional"],
-				},
-			],
-			boundary_case: {
-				description: "Leading-zero identifier through the consumer CLI",
-				expected_behavior: "Emit exactly 00123, not 123",
-				consumer: "Transferred CLI",
-				runtime: "Consumer .venv Python",
-				cwd: "/srv/consumer",
-			},
 		});
 		try {
 			harness.setResponses([fauxAssistantMessage("Prepared"), fauxAssistantMessage("Notice handled")]);
@@ -68,11 +53,6 @@ describe("delegated task contract context", () => {
 				);
 				expect(JSON.stringify(frames)).toContain("Keep the supplied serial field");
 				expect(JSON.stringify(frames)).toContain("Do not infer the asset age");
-				expect(JSON.stringify(frames)).toContain("Unchanged identifier, including leading zeros");
-				expect(JSON.stringify(frames)).toContain("Source ordering is intentional");
-				expect(JSON.stringify(frames)).toContain("Emit exactly 00123, not 123");
-				expect(JSON.stringify(frames)).toContain("Consumer .venv Python");
-				expect(JSON.stringify(frames)).toContain("/srv/consumer");
 				expect(child.goalState.status).toBe("idle");
 			} finally {
 				await capture.dispose();
@@ -87,13 +67,9 @@ describe("delegated task contract context", () => {
 		const harness = await createHarness();
 		try {
 			const reserve = vi.spyOn(harness.session, "reserveRlmChildAdmission");
-			for (const [contract, error] of [
-				[{ rules: [], hidden: true }, "task_contract.hidden"],
-				[{ stages: [{ name: "read", input_meanings: {} }] }, "task_contract.stages[0].output_meanings"],
-				[{ boundary_case: { description: "case", runtime: 1 } }, "task_contract.boundary_case.runtime"],
-			] as const) {
-				await expect(harness.session.runRlmChild("Inspect", { task_contract: contract })).rejects.toThrow(error);
-			}
+			await expect(
+				harness.session.runRlmChild("Inspect", { task_contract: { rules: [], hidden: true } }),
+			).rejects.toThrow("task_contract.hidden");
 			expect(reserve).not.toHaveBeenCalled();
 		} finally {
 			await harness.cleanup();

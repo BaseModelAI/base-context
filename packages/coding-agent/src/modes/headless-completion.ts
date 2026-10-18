@@ -78,6 +78,22 @@ function autonomousProgressKey(status: AgentAutonomousStatus): string {
 	].join(":");
 }
 
+export class HeadlessContinuationBlockedError extends Error {
+	readonly status = "blocked_external";
+
+	constructor(readonly reason: string) {
+		super(`blocked_external: ${reason}`);
+		this.name = "HeadlessContinuationBlockedError";
+	}
+}
+
+function assertContinuationReady(session: AgentSession): void {
+	const continuation = session.getContinuationStatus();
+	if (continuation.status === "blocked_external") {
+		throw new HeadlessContinuationBlockedError(continuation.hold?.reason ?? "External continuation hold");
+	}
+}
+
 export interface HeadlessCompletionOptions {
 	/** Include descendant settlement and the parent turns caused by their results. */
 	waitForRlmQuiescence?: boolean;
@@ -104,9 +120,12 @@ async function waitForHeadlessCompletionUntilSettled(
 	let repeatedProgressPrompts = 0;
 	while (true) {
 		options.signal?.throwIfAborted();
+		const autonomousRevision = session.getAutonomousRevision();
 		if (options.waitForRlmQuiescence) {
 			await session.waitForRlmQuiescence(undefined, { waitForOwnedChildDeletion: true, signal: options.signal });
 		} else await session.waitForHeadlessIdle(options.signal);
+		assertContinuationReady(session);
+		if (session.getAutonomousRevision() !== autonomousRevision) continue;
 		const status = session.getAutonomousStatus();
 		if (!shouldContinueAutonomousGates(status) || !status.lastGateFailure) {
 			return status;
@@ -122,7 +141,9 @@ async function waitForHeadlessCompletionUntilSettled(
 			await delay(Math.min(1000, repeatedProgressPrompts * 50), undefined, { signal: options.signal });
 		}
 		options.signal?.throwIfAborted();
-		session.recordHostAutonomousContinuation();
+		assertContinuationReady(session);
+		if (session.getAutonomousRevision() !== autonomousRevision) continue;
+		if (!session.recordHostAutonomousContinuation(autonomousRevision)) continue;
 		await observeCompletion(
 			session.prompt(
 				buildAutonomousGateFailureContinuation(
@@ -133,14 +154,30 @@ async function waitForHeadlessCompletionUntilSettled(
 					streamingBehavior: "followUp",
 					internalPrompt: true,
 					suppressAutonomousContinuation: true,
+					autonomousRevision,
 				},
 			),
 			options.signal,
 		);
 		options.signal?.throwIfAborted();
+		if (
+			session.getContinuationStatus().status === "blocked_external" ||
+			session.getAutonomousRevision() !== autonomousRevision
+		)
+			continue;
 		await observeCompletion(session.waitForIdle(), options.signal);
 		options.signal?.throwIfAborted();
+		if (
+			session.getContinuationStatus().status === "blocked_external" ||
+			session.getAutonomousRevision() !== autonomousRevision
+		)
+			continue;
 		await observeCompletion(session.refreshAutonomousGates(), options.signal);
+		if (
+			session.getContinuationStatus().status === "blocked_external" ||
+			session.getAutonomousRevision() !== autonomousRevision
+		)
+			continue;
 		const { primary } = selectHeadlessTerminalResult(session.state.messages);
 		if (primary?.role === "assistant") {
 			if (primary.stopReason === "error" || primary.stopReason === "aborted") {

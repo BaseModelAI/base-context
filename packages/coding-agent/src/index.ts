@@ -45,6 +45,7 @@ export {
 	serializeConversation,
 	shouldCompact,
 } from "./core/compaction/index.js";
+export type { ContinuationHold, ContinuationStatus } from "./core/continuation.js";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.js";
 // Extension system
 export type {

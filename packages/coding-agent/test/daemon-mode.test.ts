@@ -28,6 +28,12 @@ import {
 } from "../src/core/agent-messages.js";
 import type { AgentObserveController } from "../src/core/agent-observe.js";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
+import {
+	type AgentAutonomousStatus,
+	DEFAULT_AUTONOMOUS_GATES,
+	DEFAULT_AUTONOMOUS_LIMITS,
+} from "../src/core/autonomous.js";
+import type { ContinuationStatus } from "../src/core/continuation.js";
 import { type AgentCronJob, AgentCronJobStore, SESSION_SCHEDULED_JOBS_FILENAME } from "../src/core/cron-jobs.js";
 import { emptyGoalState } from "../src/core/goals.js";
 import { encodeJournalFrame, INITIAL_JOURNAL_CURSOR } from "../src/core/journal-frame.js";
@@ -77,6 +83,77 @@ import { WorkerRecoveryJournal } from "../src/modes/daemon/worker-recovery-journ
 import { createHarness } from "./suite/harness.js";
 
 describe("daemon mode helpers", () => {
+	it("dispatches continuation controls and preserves rejected blocker errors", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-agent-continuation-control-"));
+		try {
+			const ready: ContinuationStatus = { status: "ready" };
+			const blocked: ContinuationStatus = {
+				status: "blocked_external",
+				hold: { kind: "external_blocker", reason: "Credentials are required" },
+			};
+			const commands = ["npm run check"];
+			const autonomous: AgentAutonomousStatus = {
+				enabled: true,
+				continuationsUsed: 0,
+				turnsUsed: 0,
+				tokensUsed: 0,
+				limits: { ...DEFAULT_AUTONOMOUS_LIMITS },
+				gates: { ...DEFAULT_AUTONOMOUS_GATES, commands },
+				gateAttempts: {},
+			};
+			const session = {
+				getContinuationStatus: vi.fn(() => ready),
+				blockContinuation: vi.fn(async () => blocked),
+				resumeContinuation: vi.fn(async () => ready),
+				setAutonomousGates: vi.fn(() => autonomous),
+			};
+			const state = makeState("controlled");
+			state.runtime = { ...state.runtime, session } as unknown as ActiveSessionState["runtime"];
+			const daemon = new AgentDaemon(join(directory, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: directory, cwd: directory },
+				createRuntime: vi.fn(),
+			});
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+			};
+			internals.sessions.set(state.activeSessionId, state);
+			const client = makeClient("controller", state.activeSessionId);
+			await expect(
+				internals.handleCommand(client, { type: "continuation_status", activeSessionId: state.activeSessionId }),
+			).resolves.toMatchObject({ success: true, command: "continuation_status", data: ready });
+			await expect(
+				internals.handleCommand(client, {
+					type: "block_continuation",
+					activeSessionId: state.activeSessionId,
+					reason: blocked.hold!.reason,
+				}),
+			).resolves.toMatchObject({ success: true, command: "block_continuation", data: blocked });
+			expect(session.blockContinuation).toHaveBeenCalledWith(blocked.hold!.reason);
+			await expect(
+				internals.handleCommand(client, { type: "resume_continuation", activeSessionId: state.activeSessionId }),
+			).resolves.toMatchObject({ success: true, command: "resume_continuation", data: ready });
+			await expect(
+				internals.handleCommand(client, {
+					type: "set_autonomous_gates",
+					activeSessionId: state.activeSessionId,
+					commands,
+				}),
+			).resolves.toMatchObject({ success: true, command: "set_autonomous_gates", data: autonomous });
+			expect(session.setAutonomousGates).toHaveBeenCalledWith(commands);
+			session.blockContinuation.mockRejectedValueOnce(new Error("A blocker reason is required"));
+			await expect(
+				internals.handleCommand(client, {
+					type: "block_continuation",
+					activeSessionId: state.activeSessionId,
+					reason: "",
+				}),
+			).rejects.toThrow("A blocker reason is required");
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("preserves envelope client identity while registering prompt admission", () => {
 		const daemon = new AgentDaemon("/tmp/unused-daemon.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
@@ -2216,28 +2293,25 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	it("keeps corrective and unresolved child capsules and recovers reports after sender disposal and recipient reopen", async () => {
+	it("delivers only a child-result capsule and recovers its report after sender disposal and recipient reopen", async () => {
 		const { parent, child, parentState, childState, internals, controller } = await makeAgentResultDaemonFixture();
 		let reopened: SessionManager | undefined;
 		try {
 			const selectedLine = "  capsulereportmarker3: preserve the final newline and the original indentation.";
 			const findings = `# Latest parser findings\n\n${selectedLine}\n\n${"Observed parser output, not a verified outcome.\n".repeat(200)}`;
 			const reports = [
-				"capsulereportmarker1: public API loses an item; locale handling is unresolved.\n".repeat(200),
-				"capsulereportmarker2: loss occurs only after reset; locale handling is still unresolved.\n".repeat(200),
+				"capsulereportmarker1: initial parser notes\n".repeat(200),
+				"capsulereportmarker2: revised parser notes\n".repeat(200),
 				findings,
 			];
 			const receipts: AgentSessionMessageReceipt[] = [];
 			const providerMessages: string[] = [];
-			const summaries: string[] = [];
 			let summary = "";
 			for (const [index, report] of reports.entries()) {
-				summary = [
-					"Public API loses an item; locale handling is unresolved.",
-					`Correction to ${receipts[0]?.resultRef?.ref}: loss occurs only after reset. Locale handling is still unresolved.`,
-					`Ordinary calls pass. The reset defect and locale caveat from ${receipts.map((receipt) => receipt.resultRef!.ref).join(", ")} remain unresolved.`,
-				][index]!;
-				summaries.push(summary);
+				summary =
+					index === 2
+						? `Parser investigation complete. Supersedes reports ${receipts.map((receipt) => receipt.resultRef!.ref).join(", ")}; read only this latest report's relevant lines.`
+						: `Parser investigation update ${index + 1}; details are available in the report.`;
 				parent.appendResponses([
 					(context) => {
 						providerMessages.push(JSON.stringify(context.messages));
@@ -2264,10 +2338,7 @@ describe("daemon mode helpers", () => {
 			expect(receipt.message).toContain(reference.ref);
 			expect(JSON.stringify(receipts)).not.toContain("capsulereportmarker");
 			expect(providerMessages).toHaveLength(3);
-			for (const [index, earlierSummary] of summaries.entries()) {
-				expect(providerMessages[2]).toContain(earlierSummary);
-				expect(providerMessages[2]).toContain(receipts[index]!.resultRef!.ref);
-			}
+			expect(providerMessages[2]).toContain(summary);
 			expect(providerMessages.every((messages) => !messages.includes("capsulereportmarker"))).toBe(true);
 			expect(JSON.stringify(parent.session.messages)).not.toContain("capsulereportmarker");
 			expect(
@@ -2326,10 +2397,7 @@ describe("daemon mode helpers", () => {
 				expect.objectContaining({ ...reference, startLine: 3, endLine: 3, text: selectedLine }),
 			]);
 			const context = buildSessionContext(await reopened.readBranch(), reopened.getLeafId());
-			for (const [index, earlierSummary] of summaries.entries()) {
-				expect(JSON.stringify(context.messages)).toContain(earlierSummary);
-				expect(JSON.stringify(context.messages)).toContain(receipts[index]!.resultRef!.ref);
-			}
+			expect(JSON.stringify(context.messages)).toContain(summary);
 			expect(JSON.stringify(context.messages)).not.toContain("capsulereportmarker");
 		} finally {
 			await reopened?.close();

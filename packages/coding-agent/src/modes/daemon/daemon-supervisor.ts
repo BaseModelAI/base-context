@@ -551,7 +551,12 @@ function withoutCommandId(command: DaemonCommand): DaemonCommandBody {
 }
 
 function withoutSupervisorCreateFields(command: DaemonCreateCommand): DaemonCreateCommand {
-	const { launchEnv: _launchEnv, lifecycle: _lifecycle, ...workerCommand } = command;
+	const {
+		launchEnv: _launchEnv,
+		lifecycle: _lifecycle,
+		startupProgress: _startupProgress,
+		...workerCommand
+	} = command;
 	return workerCommand;
 }
 
@@ -2299,7 +2304,20 @@ export class DaemonSupervisor {
 			case "list_saved_sessions":
 				return this.handleSavedSessionList(client, command);
 			case "create": {
-				const worker = await this.createOrReuseWorker(this.protocolClientId(client), command);
+				const requestId = command.id;
+				const onStartupProgress =
+					command.startupProgress === true && requestId !== undefined
+						? (phase: DaemonWorkerStartupPhase) => {
+								this.write(client, {
+									type: "session_create_progress",
+									command: "create",
+									id: requestId,
+									startupPhase: phase.name,
+									observedAt: phase.observedAt,
+								});
+							}
+						: undefined;
+				const worker = await this.createOrReuseWorker(this.protocolClientId(client), command, onStartupProgress);
 				const requestedSummary = command.sessionPath
 					? this.findSummaryInWorker(worker, command.sessionPath)
 					: undefined;
@@ -3176,7 +3194,11 @@ export class DaemonSupervisor {
 		return success(command.id, "list_saved_sessions", page);
 	}
 
-	private async createOrReuseWorker(clientId: string, command: DaemonCreateCommand): Promise<ResidentWorker> {
+	private async createOrReuseWorker(
+		clientId: string,
+		command: DaemonCreateCommand,
+		onStartupProgress?: (phase: DaemonWorkerStartupPhase) => void,
+	): Promise<ResidentWorker> {
 		let createCommand = command;
 		if (command.name !== undefined) {
 			const normalizedName = command.name.trim();
@@ -3228,7 +3250,7 @@ export class DaemonSupervisor {
 			}
 		}
 		const opening = (async () => {
-			if (!createCommand.name) return this.launchWorker(createCommand, undefined, ownerClientId);
+			if (!createCommand.name) return this.launchWorker(createCommand, undefined, ownerClientId, onStartupProgress);
 			const savedSiblings = createCommand.sessionPath ? await this.rlmLedgerSiblings(createCommand.sessionPath) : [];
 			const target = savedSiblings.find(
 				(session) => canonicalSessionPath(session.path) === canonicalSessionPath(createCommand.sessionPath!),
@@ -3241,7 +3263,7 @@ export class DaemonSupervisor {
 				} else {
 					await this.assertSupervisorSessionNameAvailable(targetSummary, createCommand.name!);
 				}
-				return this.launchWorker(createCommand, undefined, ownerClientId);
+				return this.launchWorker(createCommand, undefined, ownerClientId, onStartupProgress);
 			});
 		})();
 		this.openingWorkers.set(key, opening);
@@ -3475,12 +3497,21 @@ export class DaemonSupervisor {
 		command: DaemonCreateCommand,
 		existing?: ResidentWorker,
 		ownerClientId?: string,
+		onStartupProgress?: (phase: DaemonWorkerStartupPhase) => void,
 	): Promise<ResidentWorker> {
 		await this.assertRecoveryAllowed();
 		if (existing && this.isWorkerRecoveryCancelled(existing)) {
 			throw new Error(`Session worker ${existing.descriptor.workerId} recovery was cancelled`);
 		}
 		let startupPhase: DaemonWorkerStartupPhase = { name: "admission", observedAt: new Date().toISOString() };
+		const notifyStartupProgress = () => {
+			try {
+				onStartupProgress?.({ ...startupPhase });
+			} catch {
+				// Optional progress must not change worker startup or its original error.
+			}
+		};
+		notifyStartupProgress();
 		const recoveryStopRevision = existing?.stopRevision;
 		const launchEnv = command.launchEnv ?? existing?.launchEnv;
 		const createCommand: DaemonCreateCommand = {
@@ -3546,6 +3577,7 @@ export class DaemonSupervisor {
 		const spawnSettled = new Promise<void>((resolveSpawn) => {
 			child.once("spawn", () => {
 				startupPhase = { name: "spawn", observedAt: new Date().toISOString() };
+				notifyStartupProgress();
 				resolveSpawn();
 			});
 			child.once("error", (error) => {
@@ -3657,6 +3689,7 @@ export class DaemonSupervisor {
 			}
 			const client = await this.connectWorker(worker, WORKER_CONNECT_TIMEOUT_MS);
 			startupPhase = { name: "handshake", observedAt: new Date().toISOString() };
+			notifyStartupProgress();
 			const response = await client.request(withoutCommandId(createCommand), WORKER_REQUEST_TIMEOUT_MS);
 			if (!response.success) {
 				throw deserializeDaemonError(response);
@@ -3669,6 +3702,7 @@ export class DaemonSupervisor {
 				throw new Error("Session worker did not preserve its assigned active session id");
 			}
 			startupPhase = { name: "session-open", observedAt: new Date().toISOString() };
+			notifyStartupProgress();
 			this.writeRosterEntry(workerRosterEntryFromSummary(summary), worker);
 			worker.descriptor.rootSessionId = summary.sessionId;
 			worker.descriptor.sessionFile = summary.sessionFile;

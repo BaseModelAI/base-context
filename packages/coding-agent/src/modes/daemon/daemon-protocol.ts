@@ -105,8 +105,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 50 adds optional captured request usage to context-tree responses.
 // Revision 51 exposes the native family-completion barrier through JSON RPC.
 // Revision 52 adds optional completion deadlines and generated-status observer interest.
-export const DAEMON_SCHEMA_REVISION = 52;
-export const DAEMON_SCHEMA_ID = "protocol-13-schema-52-completion-status-interest";
+// Revision 53 adds optional startup observations and explicit continuation control.
+export const DAEMON_SCHEMA_REVISION = 53;
+export const DAEMON_SCHEMA_ID = "protocol-13-schema-53-startup-continuation-control";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -155,6 +156,8 @@ export type DaemonServerCapability =
 	| "rlm_quiescence_barrier"
 	| "completion_wait_diagnostics"
 	| "status_summary_interest"
+	| "session_create_progress"
+	| "continuation_control"
 	| "session_input_pause"
 	| "owned_prompt_cancellation"
 	| "acp_mcp_servers"
@@ -210,6 +213,8 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"rlm_quiescence_barrier",
 	"completion_wait_diagnostics",
 	"status_summary_interest",
+	"session_create_progress",
+	"continuation_control",
 	"session_input_pause",
 	"acp_mcp_servers",
 	"native_inference_ownership",
@@ -473,6 +478,8 @@ export type DaemonCommand =
 	| ({
 			id?: string;
 			type: "create";
+			/** Optional observations, enabled only after capability negotiation. */
+			startupProgress?: boolean;
 			sessionPath?: string;
 			continueRecent?: boolean;
 			noSession?: boolean;
@@ -710,6 +717,10 @@ export type DaemonCommand =
 	| { id?: string; type: "set_follow_up_mode"; activeSessionId: string; mode: AgentConnectionQueueMode }
 	| { id?: string; type: "set_auto_compaction"; activeSessionId: string; enabled: boolean }
 	| { id?: string; type: "set_auto_retry"; activeSessionId: string; enabled: boolean }
+	| { id?: string; type: "continuation_status"; activeSessionId: string }
+	| { id?: string; type: "block_continuation"; activeSessionId: string; reason: string }
+	| { id?: string; type: "resume_continuation"; activeSessionId: string }
+	| { id?: string; type: "set_autonomous_gates"; activeSessionId: string; commands: string[] }
 	| { id?: string; type: "compact"; activeSessionId: string; customInstructions?: string }
 	| {
 			id?: string;
@@ -799,7 +810,20 @@ export const STATUS_SUMMARY_INTEREST_COMPATIBILITY = {
 	capability: "status_summary_interest",
 } as const satisfies DaemonCommandCompatibility;
 
+export const SESSION_CREATE_PROGRESS_COMPATIBILITY = {
+	minProtocol: 13,
+	minSchemaRevision: 53,
+	capability: "session_create_progress",
+} as const satisfies DaemonCommandCompatibility;
+
+export const CONTINUATION_CONTROL_COMPATIBILITY = {
+	minProtocol: 13,
+	minSchemaRevision: 53,
+	capability: "continuation_control",
+} as const satisfies DaemonCommandCompatibility;
+
 export const DAEMON_COMMAND_FIELD_COMPATIBILITY = {
+	create: { startupProgress: SESSION_CREATE_PROGRESS_COMPATIBILITY },
 	wait_for_headless_completion: {
 		timeoutMs: COMPLETION_WAIT_DIAGNOSTICS_COMPATIBILITY,
 		waitId: COMPLETION_WAIT_DIAGNOSTICS_COMPATIBILITY,
@@ -961,6 +985,10 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	set_follow_up_mode: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	set_auto_compaction: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	set_auto_retry: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	continuation_status: CONTINUATION_CONTROL_COMPATIBILITY,
+	block_continuation: CONTINUATION_CONTROL_COMPATIBILITY,
+	resume_continuation: CONTINUATION_CONTROL_COMPATIBILITY,
+	set_autonomous_gates: CONTINUATION_CONTROL_COMPATIBILITY,
 	compact: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	refine: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	abort_compaction: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
@@ -1085,6 +1113,10 @@ export const DAEMON_COMMAND_PLANE = {
 	set_follow_up_mode: "session",
 	set_auto_compaction: "session",
 	set_auto_retry: "session",
+	continuation_status: "session",
+	block_continuation: "session",
+	resume_continuation: "session",
+	set_autonomous_gates: "session",
 	compact: "session",
 	refine: "session",
 	abort_compaction: "session",
@@ -1128,6 +1160,9 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 	const requirements: DaemonCommandCompatibility[] = isLegacyDaemonInspection(command)
 		? []
 		: [...NATIVE_WORK_COMPATIBILITIES];
+	if (command.type === "create" && command.startupProgress !== undefined) {
+		requirements.push(SESSION_CREATE_PROGRESS_COMPATIBILITY);
+	}
 	if ((command.type === "attach" || command.type === "reattach") && command.recoveryConfig !== undefined) {
 		requirements.push(OWNED_SESSION_RECOVERY_CONTEXT);
 	}
@@ -1204,6 +1239,13 @@ export function isUnknownDaemonCommandError(error: unknown, command: DaemonComma
 }
 
 export type DaemonRequestProgress =
+	| {
+			id: string;
+			type: "session_create_progress";
+			command: "create";
+			startupPhase: "admission" | "spawn" | "handshake" | "session-open";
+			observedAt: string;
+	  }
 	| {
 			id?: string;
 			type: "session_list_progress";
@@ -1355,6 +1397,7 @@ export type DaemonOutbound =
 
 export const DAEMON_OUTBOUND_COMPATIBILITY = {
 	response: LEGACY_DAEMON_COMMAND,
+	session_create_progress: SESSION_CREATE_PROGRESS_COMPATIBILITY,
 	session_list_progress: LEGACY_DAEMON_COMMAND,
 	session_list_item: LEGACY_DAEMON_COMMAND,
 	daemon_hello: LEGACY_DAEMON_COMMAND,
@@ -1477,6 +1520,7 @@ const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"get_model_catalog",
 	"get_available_models",
 	"get_queue",
+	"continuation_status",
 	"cron_list",
 	"heartbeats_list",
 	"heartbeat_get",

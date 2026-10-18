@@ -3,8 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getBundledSkillsDir } from "../src/config.js";
+import type { HostRequestHandlers } from "../src/core/kernel/index.js";
+import { SessionManager } from "../src/core/session-manager.js";
 import type { PythonSkillRuntimeInfo } from "../src/core/skills.js";
 import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
+import { createHarness, type Harness } from "./suite/harness.js";
 
 function bundledGoalSkill(): PythonSkillRuntimeInfo {
 	const packagePath = join(getBundledSkillsDir(), "goal");
@@ -19,6 +22,7 @@ function bundledGoalSkill(): PythonSkillRuntimeInfo {
 describe("goal skill over the kernel host bridge", { tags: ["kernel-heavy"] }, () => {
 	let tempDir: string;
 	let provisioner: IpythonKernelProvisioner | undefined;
+	const sessions: Harness[] = [];
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `pi-goal-skill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -28,6 +32,7 @@ describe("goal skill over the kernel host bridge", { tags: ["kernel-heavy"] }, (
 	afterEach(async () => {
 		await provisioner?.dispose();
 		provisioner = undefined;
+		for (const harness of sessions.splice(0).reverse()) await harness.cleanup();
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -122,6 +127,53 @@ except RuntimeError as error:
 `);
 		expect(reroute.status).toBe("ok");
 		expect(reroute.stdout.trim()).toBe('RuntimeError: host request type "goal.get" is not available in this session');
+	});
+
+	it("loads bundled continuation through the live kernel and persists its hold without completing the goal", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			initialGoal: { objective: "Finish the pending task" },
+		});
+		sessions.push(harness);
+		const createHandlers = Reflect.get(harness.session, "_createKernelHostHandlers") as () => HostRequestHandlers;
+		const packagePath = join(getBundledSkillsDir(), "continuation");
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			pythonSkills: [
+				{
+					name: "continuation",
+					importName: "continuation",
+					packagePath,
+					pyprojectPath: join(packagePath, "pyproject.toml"),
+				},
+			],
+			hostHandlers: createHandlers.call(harness.session),
+		});
+		const manager = await provisioner.ensure();
+		const result = await manager.execute(`
+import json
+initial = await continuation.status()
+blocked = await continuation.block(reason="required input unavailable")
+print(json.dumps([initial, blocked, await continuation.status()], sort_keys=True))
+`);
+		expect(result.status).toBe("ok");
+		const blocked = {
+			status: "blocked_external",
+			hold: { kind: "external_blocker", reason: "required input unavailable" },
+		};
+		expect(JSON.parse(result.stdout.trim())).toEqual([{ status: "ready" }, blocked, blocked]);
+		expect(harness.session.goalState).toMatchObject({ status: "active", continuationsUsed: 0 });
+		const file = harness.sessionManager.getSessionFile();
+		expect(file).toBeDefined();
+		await provisioner.dispose();
+		provisioner = undefined;
+		await harness.session.disposeAsync();
+		const reopened = await createHarness({ sessionManager: await SessionManager.open(file!) });
+		sessions.push(reopened);
+		expect(reopened.session.getContinuationStatus()).toEqual(blocked);
+		expect(reopened.session.goalState).toMatchObject({ status: "active", continuationsUsed: 0 });
+		await reopened.session.prompt("/continuation resume");
+		expect(reopened.session.getContinuationStatus()).toEqual({ status: "ready" });
+		expect(reopened.session.goalState).toMatchObject({ status: "active", continuationsUsed: 0 });
 	});
 
 	it("round-trips handler records with a status field", async () => {

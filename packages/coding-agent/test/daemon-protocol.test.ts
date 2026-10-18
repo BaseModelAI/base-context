@@ -7,6 +7,7 @@ import {
 	createDaemonEventMeta,
 	createDaemonReplayInfo,
 	DAEMON_COMMAND_COMPATIBILITY,
+	DAEMON_COMMAND_FIELD_COMPATIBILITY,
 	DAEMON_COMMAND_PLANE,
 	DAEMON_DEFAULT_SERVER_CAPABILITIES,
 	DAEMON_OUTBOUND_COMPATIBILITY,
@@ -90,9 +91,9 @@ describe("daemon protocol helpers", () => {
 
 	it("advertises optional agent results without raising startup requirements", () => {
 		expect(DAEMON_PROTOCOL_VERSION).toBe(13);
-		expect(DAEMON_SCHEMA_REVISION).toBe(52);
+		expect(DAEMON_SCHEMA_REVISION).toBe(53);
 		expect(DAEMON_SCHEMA_ID).toBe(
-			`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-completion-status-interest`,
+			`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-startup-continuation-control`,
 		);
 		const command: DaemonCommand = {
 			type: "send_result",
@@ -115,6 +116,53 @@ describe("daemon protocol helpers", () => {
 		expect(getDaemonCommandCompatibilities({ type: "create" })).toEqual(NATIVE_WORK_COMPATIBILITIES);
 		expect(DAEMON_COMMAND_COMPATIBILITY.send_message).toEqual(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY);
 		expect(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minSchemaRevision).toBe(49);
+	});
+
+	it("keeps startup observations and continuation control optional across daemon versions", () => {
+		const current = {
+			protocol: DAEMON_PROTOCOL_INFO,
+			schemaRevision: DAEMON_SCHEMA_REVISION,
+			serverCapabilities: DAEMON_DEFAULT_SERVER_CAPABILITIES,
+		};
+		const old = {
+			...current,
+			schemaRevision: 52,
+			serverCapabilities: current.serverCapabilities.filter(
+				(capability) => capability !== "session_create_progress" && capability !== "continuation_control",
+			),
+		};
+		const progress = DAEMON_OUTBOUND_COMPATIBILITY.session_create_progress;
+		expect(progress).toEqual({ minProtocol: 13, minSchemaRevision: 53, capability: "session_create_progress" });
+		expect(DAEMON_COMMAND_FIELD_COMPATIBILITY.create.startupProgress).toEqual(progress);
+		expect(meetsDaemonCommandCompatibility(old, progress)).toBe(false);
+		expect(meetsDaemonCommandCompatibility(current, progress)).toBe(true);
+		expect(getDaemonCommandCompatibilities({ type: "create", startupProgress: true })).toEqual([
+			...NATIVE_WORK_COMPATIBILITIES,
+			progress,
+		]);
+		for (const hello of [old, current]) {
+			expect(
+				getDaemonCommandCompatibilities({ type: "create" }).every((requirement) =>
+					meetsDaemonCommandCompatibility(hello, requirement),
+				),
+			).toBe(true);
+			expect(getDaemonCommandCompatibilities({ type: "get_state", activeSessionId: "session" })).toEqual([
+				DAEMON_COMMAND_COMPATIBILITY.get_state,
+			]);
+		}
+		for (const type of [
+			"continuation_status",
+			"block_continuation",
+			"resume_continuation",
+			"set_autonomous_gates",
+		] as const) {
+			const compatibility = DAEMON_COMMAND_COMPATIBILITY[type];
+			expect(compatibility).toEqual({ minProtocol: 13, minSchemaRevision: 53, capability: "continuation_control" });
+			expect(meetsDaemonCommandCompatibility(old, compatibility)).toBe(false);
+			expect(meetsDaemonCommandCompatibility(current, compatibility)).toBe(true);
+			expect(DAEMON_COMMAND_PLANE[type]).toBe("session");
+			expect(isDaemonMutatingCommand({ type })).toBe(type !== "continuation_status");
+		}
 	});
 
 	it("requires the advertised RPC family barrier without changing legacy commands", () => {

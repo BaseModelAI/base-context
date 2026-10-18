@@ -446,7 +446,8 @@ export class HistoryIndex {
 			fail(new Error("History-index worker disconnected"));
 			if (!this.closing) this.child.kill();
 		});
-		this.child.on("exit", (code) =>
+		// Exit can precede delivery of the final IPC response; close follows IPC drain.
+		this.child.on("close", (code) =>
 			fail(new Error(`History-index worker exited (${code})${diagnostics ? `: ${diagnostics}` : ""}`)),
 		);
 		this.child.on("message", (message: Response) => {

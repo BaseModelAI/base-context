@@ -2141,7 +2141,7 @@ describe("daemon worker supervisor monitoring", () => {
 			expect(supervisor.workers.has(worker.descriptor.workerId)).toBe(false);
 			expect(existsSync(worker.descriptorPath)).toBe(false);
 			expect(launchWorker).toHaveBeenCalledOnce();
-			expect(launchWorker).toHaveBeenCalledWith(command, undefined, "fresh-owner");
+			expect(launchWorker).toHaveBeenCalledWith(command, undefined, "fresh-owner", undefined);
 			expect(readFileSync(sessionPath, "utf8")).toBe(retainedSource);
 			expect(readFileSync(childPath, "utf8")).toBe(retainedSource);
 		},

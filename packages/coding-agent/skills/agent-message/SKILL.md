@@ -87,13 +87,6 @@ report or reports. Older reports remain readable. Do not treat unrelated
 findings or unresolved blockers as replaced merely because a newer report
 arrived. There is no automatic latest-wins, dropping, or coalescing.
 
-Put decisive contrary evidence, corrected premises, and explicit caveats in the
-summary or `outcome`, not only the archived findings. Parents keep these facts
-and claims, with their report references, in current decisions and final briefs
-until resolved against the user request. Do not hide an unresolved conflict in
-a narrower brief or treat a more favorable report as its resolution. State what
-remains uncertain when the available evidence does not settle it.
-
 ## Optional structured outcome
 
 Use only fields relevant to the report. Unknown fields and invalid shapes are
@@ -139,11 +132,10 @@ task contracts, delivery staging, and bounded search.
 - Avoid routine acknowledgements and repeated status broadcasts. Messaging an
   idle child can start another turn; not every message needs a reply.
 
-- `await rlm.delete_subagent(child)` cancels a busy child's active work and can
-  discard an unsent correction. For routine cleanup, receive the requested result
-  and observe idle before deletion. A delivered or queued `send` receipt does not
-  mean the follow-up finished. Intentional cancellation remains allowed; report
-  it as cancellation, not completed work.
+- Do not delete a child immediately after `send`: delivered follow-ups may still
+  be running and queued receipts have not run yet. Wait until observation shows
+  the child is idle and its context is no longer needed before calling
+  `await rlm.delete_subagent(child)`.
 - Reach is limited to parent, siblings, and direct children; relay through an
   intermediate child instead of messaging grandchildren or cousins directly.
 - Sender identity is daemon-derived and cannot be spoofed from Python.

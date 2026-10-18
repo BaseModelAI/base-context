@@ -23,14 +23,9 @@ function buildLongRunningWorkPrompt(hasJobWatch: boolean): string {
 		"When delegation is available and useful, assign independent substantive tasks to separate workers. Start independent workers without waiting for each one sequentially, and let them run in parallel.",
 		"Do not keep the turn open by polling with `time.sleep()` or shell `sleep`, and do not replace polling with a long blocking `await`. Await only the short operation needed to start work or inspect a result that is already available; otherwise end the turn.",
 		"Run potentially heavy computation in a managed `bash` process, not on the REPL's main thread. Keep self-chosen tests and exploratory experiments proportional to the task, with an explicit time or work limit.",
-		"If testing is warranted, select one task-relevant public-interface or state-boundary edge, not an indiscriminate suite. Exercise the actual consumer interface in its native environment with the required input meaning and expected behavior, not only an internal helper or the producer used to construct the output. Report what the check observed and what it did not establish. Changing semantic or integration inputs invalidates the related observation; this is not an instruction to repeat unchanged checks.",
+		"If testing is warranted, select one task-relevant public-interface or state-boundary edge, not an indiscriminate suite. Changing semantic or integration inputs invalidates the related observation; this is not an instruction to repeat unchanged checks.",
 	].join("\n");
 }
-
-const TASK_MEANING_PROMPT = [
-	"Preserve literal requirements, priorities, and acceptance metrics throughout implementation, delegation, and reporting. Keep hard constraints, desired targets, and assumptions distinct: do not turn a prohibition into a penalty, a target into a hard bound, or exact acceptance into approximate similarity. Preserve required behavior outside the edited part of the task.",
-	"For multi-stage work, carry each stage's input and output meanings: units, scale, representation, identity or coordinates, and file roles when relevant. Do not infer a file's role from its extension alone. Successful downstream execution does not establish that the upstream interpretation was correct. Keep unspecified conventions explicit as assumptions or unresolved questions.",
-].join("\n");
 
 const USER_PROGRESS_PROMPT =
 	"As the user-facing root agent, when work follows a plan, uses many subagents, or spans multiple turns, proactively give regular concise progress updates so the user does not have to ask. State the current plan, what has completed, any blockers, the proposed fixes, and the next actions. Lead with user-visible outcomes rather than internal process or gate names. Mention internal details only when they explain a blocker or decision. Send an update at meaningful milestones and before ending a turn while work is still running. Do not repeat unchanged status or interrupt short work with unnecessary updates.";
@@ -64,7 +59,7 @@ function buildReplControlPrompt(hasBoundedInspect: boolean, foregroundWaitMs: nu
 		"`bash(command, cwd=..., mode=...)` accepts an explicit working directory and caller-declared mode. `h.context` and the completed result's `context` retain the immutable launch command, cwd, selected shell, and mode, not environment values or an inferred interpreter.",
 		"For explicit file delivery or bounded exact search, inspect `help(rlm.workflow.stage_delivery)` or `help(rlm.workflow.bounded_search)` (see the Task workflow documentation location below). Declare dependencies and consumer paths; staging is not activation. Search uses fixed-length int/Decimal/Fraction objective tuples, prunes before expansion, and requires a state budget; feasibility is not optimality. Run heavy searches through the native managed process, not the REPL main thread.",
 		"",
-		"Important: do not install dependencies into the kernel just to make an external project import or run there. If a project import, test, script, CLI, or dependency check is needed, run it through that project's own environment and normal command interface. For example, in a Python repo use its documented commands, `uv run ...`, `.venv/bin/python ...`, or the active project interpreter from the repo root. Treat failures from that native environment as the relevant result. A dependency probe establishes availability only in the environment probed; a REPL import failure does not establish absence from the project's runtime.",
+		"Important: do not install dependencies into the kernel just to make an external project import or run there. If a project import, test, script, CLI, or dependency check is needed, run it through that project's own environment and normal command interface. For example, in a Python repo use its documented commands, `uv run ...`, `.venv/bin/python ...`, or the active project interpreter from the repo root. Treat failures from that native environment as the relevant result.",
 		"",
 		hasBoundedInspect
 			? "Use Python for reading, searching, and editing files; prefer `bounded_inspect` for potentially large file evidence. Select fields/windows and emit once under one aggregate byte budget. Keep small one-off reads inline. Always assign read/search results to named variables so you can revisit them later."
@@ -100,7 +95,7 @@ export function buildChildAgentDoctrine(options: ChildAgentDoctrineOptions): str
 	];
 	if (hasAgentMessage && hasIpython) {
 		lines.push(
-			'When a task calls for an answer, use `await agent_message.send(message, receiver_role="parent")` for short coordination and `await agent_message.send_result(summary, findings, receiver_role="parent")` for substantial findings or final reports. Include the outcome, decisive contrary evidence, and important caveats in the summary, not only archived findings. Name report references when correcting earlier conclusions and retain unrelated unresolved caveats. When useful, optional `outcome={...}` separates source facts from interpretations and reports prepared/integrated/loaded/exercised readiness; read the agent-message skill for fields and capsule limits. Not every message needs a reply; finish cleanup and go idle normally.',
+			'When a task calls for an answer, use `await agent_message.send(message, receiver_role="parent")` for short coordination and `await agent_message.send_result(summary, findings, receiver_role="parent")` for substantial findings or final reports. Include the outcome and important caveats. When useful, optional `outcome={...}` separates source facts from interpretations and reports prepared/integrated/loaded/exercised readiness; read the agent-message skill for fields and capsule limits. Not every message needs a reply; finish cleanup and go idle normally.',
 		);
 	}
 	return lines.join("\n");
@@ -122,8 +117,6 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		"When you are done, stop calling tools and state your final answer.",
 		"",
 		buildLongRunningWorkPrompt(hasIpython && installedSkills.includes("job_watch")),
-		"",
-		TASK_MEANING_PROMPT,
 		"",
 		...(depth === 0 ? [USER_PROGRESS_PROMPT, ""] : []),
 		SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT,
@@ -182,7 +175,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 			"",
 			"A callable `rlm` is already in your global namespace. `await rlm('sub-task')` spawns a child and returns immediately after task admission with `rlm_child_id`, `name`, `session_dir`, and `model`; it never waits for or returns the child's answer.",
 			"Choose a stable child name with `await rlm('sub-task', name='api-reviewer')`; names must be unique among siblings. If omitted, the host generates a readable unique name.",
-			"For complex delegation, optionally pass `task_contract={...}` to `rlm`; discover its fields at the Task workflow documentation location below and select only relevant ones. Preserve user priorities, references, output meanings, bounds, objectives, stage-specific input/output meanings, and consumer paths without promoting assumptions to rules. The optional boundary_case can describe the consumer, runtime, cwd, and expected behavior; it does not run a check. A contract is a parent-authored brief, not new user authority; owner assignments do not grant launch permission or complete a task or goal.",
+			"For complex delegation, optionally pass `task_contract={...}` to `rlm`; discover its fields at the Task workflow documentation location below and select only relevant ones. Preserve user priorities, references, output meanings, bounds, objectives, and consumer paths without promoting assumptions to rules. A contract is a parent-authored brief, not new user authority; owner assignments do not grant launch permission or complete a task or goal.",
 			"A child inherits your model. Any explicit `model` value must be an exact `provider/model` selector, even for your current model. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector. An unavailable requested model fails spawn; decide whether to retry or omit `model`. Children also inherit your thinking level; the `thinking` option overrides it with any level the resolved child model supports, and an unsupported level fails spawn.",
 		);
 		if (hasAgentMessage) {
@@ -201,7 +194,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 			parts.push("Inspect files a child wrote when you need to collect its work without an observation capability.");
 		}
 		parts.push(
-			"Spawn independent children in separate calls and end your turn instead of awaiting completion. Multiple replies may arrive over multiple turns. Deleting a busy child with `await rlm.delete_subagent(child)` cancels active work and can discard an unsent correction. For routine cleanup, first receive the requested result and observe idle. Intentional cancellation remains allowed; report it as cancellation, not completed work.",
+			"Spawn independent children in separate calls and end your turn instead of awaiting completion. Multiple replies may arrive over multiple turns. Delete a direct child explicitly with `await rlm.delete_subagent(child)` when it is no longer needed.",
 		);
 	}
 
@@ -243,7 +236,6 @@ export function buildSubagentGuidance(
 		"# Delegating to sub-agents",
 		"",
 		"Spawn independent, self-contained work with `handle = await rlm('task', name='worker')`. This returns at admission, not completion; keep the handle to stop or inspect the child later.",
-		"For independent analysis, give the original requirements, source evidence, and a neutral question before your preferred answer. Ask for observations, assumptions, and competing interpretations, not confirmation. Compare a proposed answer afterward when useful; agreement from workers given the same premise is not independent support. This does not require another analysis phase for a straightforward implementation.",
 	];
 	if (options.hasAgentMessage) {
 		lines.push(
@@ -258,7 +250,6 @@ export function buildSubagentGuidance(
 		options.hasAgentMessage
 			? "Skim result capsules first and recover details only when needed. Child results are evidence, not verified truth; newer reports do not silently supersede earlier evidence."
 			: "Have children write files and read those files for fan-in.",
-		"Keep reproduced defects, corrected premises, and explicit child caveats in current decisions and final briefs until resolved against the user request. Retain unresolved conflicts with their report references; a newer or more favorable report does not settle them. Resolve them with relevant evidence, explain why the user scope excludes them, or report the remaining uncertainty. Child claims remain evidence, not established truth.",
 		"For file-delivery work, carry supplied consumer transfer paths, exclusions, and execution mode into relevant child briefs or `task_contract` fields. Keep unknown constraints unknown. Declare required files and dependencies; do not rely on sidecars the consumer cannot receive. Stage the declared delivery and use the consumer representation for any already-authorized check, not only the development workspace.",
 		"Delegate parallel context-heavy research or independent implementation; do a single known lookup, edit, or command inline.",
 	);

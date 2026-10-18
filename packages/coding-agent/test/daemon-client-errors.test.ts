@@ -90,6 +90,93 @@ afterEach(() => {
 });
 
 describe("daemon request errors", () => {
+	it("reports the latest observed create milestone without extending the timeout", async () => {
+		const client = new DaemonClient("/tmp/e5-daemon.sock");
+		clients.push(client);
+		const socket = await connect(client);
+		const onProgress = vi.fn();
+		const pending = rejection(client.request({ type: "create" }, 40, { onProgress }));
+		await vi.advanceTimersByTimeAsync(0);
+		const wire = JSON.parse(socket.writes[0].toString());
+		expect(wire.command.startupProgress).toBe(true);
+		for (const startupPhase of ["spawn", "handshake"]) {
+			socket.emit(
+				"data",
+				`${JSON.stringify({
+					type: "session_create_progress",
+					command: "create",
+					id: wire.id,
+					startupPhase,
+					observedAt: "2026-10-18T12:00:00.000Z",
+				})}\n`,
+			);
+		}
+		expect(onProgress).toHaveBeenCalledTimes(2);
+		await vi.advanceTimersByTimeAsync(40);
+		const error = await pending;
+		expect(error.message).toContain("elapsedMs: 40");
+		expect(error.message).toContain("lastStartupPhase: handshake");
+		expect(error.message).toContain("startupPhaseObservedAt: 2026-10-18T12:00:00.000Z");
+		expect(socket.writes).toHaveLength(1);
+	});
+
+	it.each([
+		{ schemaRevision: 52 },
+		{
+			serverCapabilities: DAEMON_DEFAULT_SERVER_CAPABILITIES.filter(
+				(capability) => capability !== "session_create_progress",
+			),
+		},
+	])("creates normally without optional progress on an older daemon: %j", async (helloOverrides) => {
+		const client = new DaemonClient("/tmp/e5-old-daemon.sock");
+		clients.push(client);
+		const socket = await connect(client, helloOverrides);
+		const pending = client.request({ type: "create" }, 40);
+		await vi.advanceTimersByTimeAsync(0);
+		const wire = JSON.parse(socket.writes[0].toString());
+		expect(wire.command).not.toHaveProperty("startupProgress");
+		socket.emit(
+			"data",
+			`${JSON.stringify({ type: "response", command: "create", id: wire.id, success: true, data: { activeSessionId: "created" } })}\n`,
+		);
+		await expect(pending).resolves.toMatchObject({ success: true, data: { activeSessionId: "created" } });
+	});
+
+	it.each([
+		{ type: "continuation_status", activeSessionId: "session" },
+		{ type: "block_continuation", activeSessionId: "session", reason: "input missing" },
+		{ type: "resume_continuation", activeSessionId: "session" },
+		{ type: "set_autonomous_gates", activeSessionId: "session", commands: ["CaseSensitiveGate"] },
+	] as const)("gates $type before sending to an older daemon", async (command) => {
+		const request =
+			command.type === "set_autonomous_gates" ? { ...command, commands: [...command.commands] } : command;
+		for (const helloOverrides of [
+			{ schemaRevision: 52 },
+			{
+				serverCapabilities: DAEMON_DEFAULT_SERVER_CAPABILITIES.filter(
+					(capability) => capability !== "continuation_control",
+				),
+			},
+		]) {
+			const client = new DaemonClient("/tmp/e5-old-daemon.sock");
+			clients.push(client);
+			const socket = await connect(client, helloOverrides);
+			await expect(client.request(request)).rejects.toMatchObject({ capability: "continuation_control" });
+			expect(socket.writes).toHaveLength(0);
+		}
+		const client = new DaemonClient("/tmp/e5-new-daemon.sock");
+		clients.push(client);
+		const socket = await connect(client);
+		const pending = client.request(request);
+		await vi.advanceTimersByTimeAsync(0);
+		const wire = JSON.parse(socket.writes[0].toString());
+		expect(wire.command).toMatchObject(request);
+		socket.emit(
+			"data",
+			`${JSON.stringify({ type: "response", command: command.type, id: wire.id, success: true })}\n`,
+		);
+		await expect(pending).resolves.toMatchObject({ success: true });
+	});
 	it.each(["explicit", "socket"] as const)(
 		"preserves the first %s worker close cause for pending requests",
 		async (source) => {
@@ -134,6 +221,26 @@ describe("daemon request errors", () => {
 		expect(error.message).toContain("Request ID: worker_1; elapsedMs: 290");
 		expect(error.message).toContain("lastStartupPhase: unknown");
 		expect(error.message).toContain("Socket: /tmp/e5-worker.sock");
+	});
+
+	it("drops only optional progress when an existing create reconnects to a pre-progress daemon", async () => {
+		const client = new DaemonClient("/tmp/e5-daemon.sock");
+		clients.push(client);
+		const socket = await connect(client);
+		client.enableRequestRecovery();
+		const pending = rejection(client.request({ type: "create" }, 40));
+		await vi.advanceTimersByTimeAsync(20);
+		const original = JSON.parse(socket.writes[0].toString());
+		expect(original.command.startupProgress).toBe(true);
+		socket.destroy();
+		socket.emit("close");
+		const replacement = await connect(client, { schemaRevision: 52 });
+		const replay = JSON.parse(replacement.writes[0].toString());
+		const { startupProgress: _startupProgress, ...command } = original.command;
+		expect(replay).toEqual({ ...original, command });
+		await vi.advanceTimersByTimeAsync(40);
+		expect((await pending).message).toContain("elapsedMs: 60");
+		expect(replacement.writes).toHaveLength(1);
 	});
 
 	it("reports total elapsed daemon request time across an existing reconnect timeout re-arm", async () => {

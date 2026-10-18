@@ -4989,6 +4989,26 @@ export class AgentDaemon {
 				return success(command.id, "get_state", await summaryForActiveSession(state));
 			}
 
+			case "continuation_status": {
+				const session = this.getBoundSessionState(command.activeSessionId).runtime.session;
+				return success(command.id, "continuation_status", session.getContinuationStatus());
+			}
+
+			case "block_continuation": {
+				const session = this.getBoundSessionState(command.activeSessionId).runtime.session;
+				return success(command.id, "block_continuation", await session.blockContinuation(command.reason));
+			}
+
+			case "resume_continuation": {
+				const session = this.getBoundSessionState(command.activeSessionId).runtime.session;
+				return success(command.id, "resume_continuation", await session.resumeContinuation());
+			}
+
+			case "set_autonomous_gates": {
+				const session = this.getBoundSessionState(command.activeSessionId).runtime.session;
+				return success(command.id, "set_autonomous_gates", session.setAutonomousGates(command.commands));
+			}
+
 			case "get_connection_state": {
 				const state = this.getSessionState(command.activeSessionId);
 				return success(command.id, "get_connection_state", await this.createConnectionState(state));

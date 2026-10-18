@@ -47,7 +47,6 @@ import {
 } from "@ponythewhite/base-context-ai";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { PRODUCT } from "../product-identity.js";
-
 import { sleep } from "../utils/sleep.js";
 import {
 	AGENT_MESSAGE_CUSTOM_TYPE,
@@ -97,6 +96,7 @@ import {
 	type AutonomousRuntimeState,
 	addAutonomousContinuation,
 	addAutonomousUsage,
+	autonomousLimitReason,
 	autonomousRunLimitReason,
 	autonomousStatus,
 	createAutonomousRuntimeState,
@@ -154,6 +154,12 @@ import {
 	readContextTreeUsage,
 	readResidentContextTreeUsage,
 } from "./context-tree.js";
+import {
+	CONTINUATION_HOLD_CUSTOM_TYPE,
+	type ContinuationHold,
+	type ContinuationStatus,
+	readContinuationHold,
+} from "./continuation.js";
 import type { AgentCronJob, AgentRlmHeartbeatController, AgentRlmHeartbeatStatusUpdate } from "./cron-jobs.js";
 import { normalizeHeartbeatDeliveryMode } from "./cron-jobs.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
@@ -193,6 +199,7 @@ import {
 	GOAL_CONTEXT_PREVIEW_LABEL,
 	GOAL_SKILL_NAME,
 	GOAL_STATE_CUSTOM_TYPE,
+	type GoalContextDetails,
 	type GoalHostResponse,
 	type GoalState,
 	goalHostResponse,
@@ -689,6 +696,7 @@ export interface PromptOptions {
 	queueIfBusy?: boolean;
 	resumeIfIdle?: boolean;
 	internalPrompt?: boolean;
+	autonomousRevision?: number;
 	suppressAutonomousContinuation?: boolean;
 	skipInputHandlers?: boolean;
 	signal?: AbortSignal;
@@ -772,6 +780,7 @@ function turnExecutionPoliciesEqual(left: TurnExecutionPolicy, right: TurnExecut
 }
 
 interface PreparedTurnPayload extends RecoverableTurnPayload {
+	autonomousRevision?: number;
 	isIpythonCompletionRequired?: () => boolean;
 	prepared?: PreparedPromptPreparation;
 	captureRunMessages?: Set<AgentMessage>;
@@ -949,6 +958,7 @@ interface ThresholdGoalContinuation extends CheckpointAction {
 }
 
 interface ThresholdAutonomousOwner {
+	revision: number;
 	state: AutonomousRuntimeState;
 	snapshot: AutonomousRuntimeState;
 	cwd: string;
@@ -995,7 +1005,11 @@ type GoalSlashCommand =
 	| { kind: "resume" }
 	| { kind: "start"; objective: string; tokenBudget?: number };
 
-type AutonomousSlashCommand = { kind: "status" } | { kind: "on" } | { kind: "off" };
+type AutonomousSlashCommand =
+	| { kind: "status" }
+	| { kind: "on" }
+	| { kind: "off" }
+	| { kind: "gates"; commands: string[] };
 
 import type { RlmMaxDepthSource, RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./rlm-max-depth.js";
 import {
@@ -1275,6 +1289,8 @@ export class AgentSession {
 	private _jobWatchController?: JobWatchController;
 	private _goalAbortInProgress = false;
 	private _autonomousState: AutonomousRuntimeState;
+	private _continuationHold: ContinuationHold | undefined;
+	private _autonomousRevision = 0;
 	private _autonomousContinuationSuppressionDepth = 0;
 	private _autonomousContinuationSuppressedMessages = new WeakSet<AgentMessage>();
 	private readonly _invocationOutputLimits: AgentOutputLimits;
@@ -1910,6 +1926,10 @@ export class AgentSession {
 		this._rlmParentAdmission?.assertCurrent();
 		this._contextMode = await this._readContextMode();
 		const freshContextContract = this.sessionManager.canSeedContextModeContract();
+		this._continuationHold = await readContinuationHold(
+			this.sessionManager,
+			this.settingsManager.getCanonicalContextLimits().maxSourceBytes,
+		);
 		let goalSeedable = false;
 		if (this.sessionManager.isPersisted()) {
 			const bootstrap = await this._readRuntimeBootstrap();
@@ -2550,6 +2570,11 @@ export class AgentSession {
 	}
 
 	private async _reloadBranchRuntimeState(): Promise<void> {
+		this._autonomousRevision++;
+		this._continuationHold = await readContinuationHold(
+			this.sessionManager,
+			this.settingsManager.getCanonicalContextLimits().maxSourceBytes,
+		);
 		this._jobWatchController?.dispose();
 		this._jobWatchController = undefined;
 		this._contextMode = await this._readContextMode();
@@ -2817,6 +2842,8 @@ export class AgentSession {
 	private _parseAutonomousSlashCommand(text: string): AutonomousSlashCommand | undefined {
 		const command = parseSessionSlashCommand(text);
 		if (command?.name !== "autonomous") return undefined;
+		const gateMatch = /^gates\s+set\s+([\s\S]+)$/i.exec(command.args);
+		if (gateMatch) return { kind: "gates", commands: JSON.parse(gateMatch[1]) as string[] };
 		const rest = command.args.toLowerCase();
 		if (!rest || rest === "status") {
 			return { kind: "status" };
@@ -2827,7 +2854,7 @@ export class AgentSession {
 		if (rest === "off" || rest === "disable" || rest === "disabled") {
 			return { kind: "off" };
 		}
-		throw new Error("Usage: /autonomous [on|off|status]");
+		throw new Error("Usage: /autonomous [on|off|status|gates set <JSON-array>]");
 	}
 
 	private _formatAutonomousStatus(): string {
@@ -2861,10 +2888,14 @@ export class AgentSession {
 		if (!command) {
 			return false;
 		}
-		if (command.kind === "on") {
+		if (command.kind === "gates") {
+			this.setAutonomousGates(command.commands);
+		} else if (command.kind === "on") {
+			this._autonomousRevision++;
 			this._autonomousContinuationAwaitingRlmWork = undefined;
 			setAutonomousEnabled(this._autonomousState, true, { cwd: this._cwd });
 		} else if (command.kind === "off") {
+			this._autonomousRevision++;
 			this._autonomousContinuationAwaitingRlmWork = undefined;
 			setAutonomousEnabled(this._autonomousState, false);
 			this._clearQueuedAutonomousContinuations();
@@ -2953,6 +2984,7 @@ export class AgentSession {
 	private async _resumeGoalContinuationAfterRlmWork(): Promise<void> {
 		if (!this._goalContinuationAwaitsRlmWork && !this._autonomousContinuationAwaitingRlmWork) return;
 		if (
+			this._continuationHold ||
 			this._disposed ||
 			this._disposing ||
 			this._hasUnsettledRlmQuiescenceWork(true) ||
@@ -2973,6 +3005,7 @@ export class AgentSession {
 		// (post-abort); the pause release and resumeQueuedWork retry.
 		if (this._sessionInputAdmissionPauses.size > 0 || this._sessionInputPumpSuspended) return;
 		const owner = this._captureGoalContinuationOwner();
+		const revision = this._autonomousRevision;
 		const goalBeforeResume = owner.goal;
 		try {
 			this._ensureGoalRuntimeActive();
@@ -2986,6 +3019,10 @@ export class AgentSession {
 				{ continuationOwner: owner },
 			);
 			if (!this._isGoalContinuationOwnerCurrent(owner)) return;
+			if (this._continuationHold || this._autonomousRevision !== revision) {
+				await this._setGoalState(goalBeforeResume, { continuationOwner: owner });
+				return;
+			}
 			if (this._hasUnsettledRlmQuiescenceWork(true)) {
 				await this._holdGoalContinuationAfterOwnedWorkAdmission(owner, goalBeforeResume);
 				return;
@@ -3025,6 +3062,7 @@ export class AgentSession {
 
 	private _deferAutonomousContinuationForRlmWork(message: AssistantMessage, signal?: AbortSignal): boolean {
 		if (
+			this._continuationHold ||
 			!this._autonomousState.enabled ||
 			message.stopReason === "error" ||
 			message.stopReason === "aborted" ||
@@ -3049,7 +3087,7 @@ export class AgentSession {
 
 	private async _resumeAutonomousContinuationAfterRlmWork(): Promise<void> {
 		const held = this._autonomousContinuationAwaitingRlmWork;
-		if (!held) return;
+		if (!held || this._continuationHold) return;
 		if (!held.isCurrent()) {
 			this._autonomousContinuationAwaitingRlmWork = undefined;
 			return;
@@ -3066,6 +3104,7 @@ export class AgentSession {
 		const message = await nextAutonomousContinuation(candidate, held.message, {
 			cwd: this._cwd,
 			signal: held.signal,
+			isCurrent: () => !this._continuationHold && held.isCurrent(),
 		});
 		if (
 			this._autonomousContinuationAwaitingRlmWork !== held ||
@@ -3081,6 +3120,7 @@ export class AgentSession {
 		const admitted = this._admitSessionInput(
 			this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
 				message,
+				autonomousRevision: this._autonomousRevision,
 				resumeIfIdle: true,
 			}),
 		);
@@ -3962,6 +4002,7 @@ export class AgentSession {
 
 	private _captureThresholdAutonomousOwner(): ThresholdAutonomousOwner {
 		return {
+			revision: this._autonomousRevision,
 			state: this._autonomousState,
 			snapshot: structuredClone(this._autonomousState),
 			cwd: this._cwd,
@@ -3993,6 +4034,7 @@ export class AgentSession {
 		capture = this._captureThresholdAutonomousOwner(),
 	): Promise<CheckpointAction | undefined> {
 		if (
+			this._continuationHold ||
 			!this._isCompactionOwnerCurrent(owner) ||
 			!this._contextOptimizationAllowed() ||
 			this._jobWatchController?.isParked()
@@ -4002,14 +4044,23 @@ export class AgentSession {
 		const queued = this._queuedAutonomousThresholdContinuations.get(message);
 		if (queued && this._checkpointActionPending(queued)) return queued;
 		const { state, snapshot: original, arrivalEpoch, cwd } = capture;
+		const revision = capture.revision;
 		const before = this._snapshotAutonomousRuntimeState(original);
 		const candidate = structuredClone(original);
 		const current = () =>
-			this._isCompactionOwnerCurrent(owner) && this._autonomousState === state && isDeepStrictEqual(state, original);
+			!this._continuationHold &&
+			this._autonomousRevision === revision &&
+			this._isCompactionOwnerCurrent(owner) &&
+			this._autonomousState === state &&
+			isDeepStrictEqual(state, original);
 		if (!current()) return undefined;
 		let messageToQueue: UserMessage | undefined;
 		try {
-			messageToQueue = await nextAutonomousContinuation(candidate, message, { cwd, signal: owner.signal });
+			messageToQueue = await nextAutonomousContinuation(candidate, message, {
+				cwd,
+				signal: owner.signal,
+				isCurrent: current,
+			});
 		} catch (error) {
 			if (current()) this._restoreAutonomousRuntimeSnapshot(candidate);
 			throw error; // Preserve the actual command/orphan owner's primary failure even after replacement.
@@ -4022,6 +4073,7 @@ export class AgentSession {
 		const normalized = normalizeMessageContent(messageToQueue.content);
 		const action = this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
 			message: messageToQueue,
+			autonomousRevision: this._autonomousRevision,
 		});
 		const admitted = this._admitSessionInput(action);
 		if (!admitted.accepted || !admitted.ticket) {
@@ -4051,7 +4103,12 @@ export class AgentSession {
 	): Promise<CheckpointAction | undefined> {
 		if (!this._isGoalContinuationOwnerCurrent(owner) || !this._contextOptimizationAllowed()) return undefined;
 		if (message.stopReason === "error" || message.stopReason === "aborted") return undefined;
-		if (owner.goal.status !== "active" || !owner.goal.objective || this._jobWatchController?.isParked())
+		if (
+			this._continuationHold ||
+			owner.goal.status !== "active" ||
+			!owner.goal.objective ||
+			this._jobWatchController?.isParked()
+		)
 			return undefined;
 		if (this._hasUnsettledRlmQuiescenceWork(true)) {
 			this._goalContinuationAwaitsRlmWork = true;
@@ -4060,6 +4117,7 @@ export class AgentSession {
 		const queued = this._queuedGoalThresholdContinuation;
 		if (queued && this._checkpointActionPending(queued)) return queued;
 		if (!this._goalContinuationHasProgress && message.stopReason !== "toolUse") return undefined;
+		const revision = this._autonomousRevision;
 		const before = owner.goal;
 		let counted = false;
 		try {
@@ -4079,7 +4137,7 @@ export class AgentSession {
 				await this._holdGoalContinuationAfterOwnedWorkAdmission(owner, before);
 				return undefined;
 			}
-			if (!this._contextOptimizationAllowed()) {
+			if (this._continuationHold || this._autonomousRevision !== revision || !this._contextOptimizationAllowed()) {
 				await this._setGoalState(before, { continuationOwner: owner });
 				return undefined;
 			}
@@ -4644,10 +4702,12 @@ export class AgentSession {
 		owner: GoalContinuationOwner,
 	): Promise<AgentContinuationOutcome> {
 		if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
+		if (this._continuationHold) return { kind: "finish" };
 		if (await this._stopGoalContinuationForTerminalMessage(context.message, owner)) {
 			return this._stoppedContinuationOutcome(owner.signal);
 		}
 		if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
+		if (this._continuationHold) return { kind: "finish" };
 		if (this._goals.state.status !== "active" || !this._goals.state.objective) {
 			return { kind: "finish" };
 		}
@@ -4669,7 +4729,12 @@ export class AgentSession {
 				lastError: undefined,
 			};
 			await this._setGoalState(nextGoal, { continuationOwner: owner });
+			if (this._continuationHold && this._isGoalContinuationOwnerCurrent(owner)) {
+				await this._setGoalState(previousGoal, { continuationOwner: owner });
+				return { kind: "finish" };
+			}
 			if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
+			if (this._continuationHold) return { kind: "finish" };
 			if (this._hasUnsettledRlmQuiescenceWork(true)) {
 				await this._holdGoalContinuationAfterOwnedWorkAdmission(owner, previousGoal);
 				return { kind: "wait_for_owned_work" };
@@ -4677,6 +4742,7 @@ export class AgentSession {
 			return { kind: "continue", messages: [createGoalContextMessage(owner.goal, "continuation")] };
 		} catch (error) {
 			if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
+			if (this._continuationHold) return { kind: "finish" };
 			const message = error instanceof Error ? error.message : String(error);
 			try {
 				await this._goals.finishWithError(message, owner);
@@ -4701,17 +4767,22 @@ export class AgentSession {
 		signal?: AbortSignal,
 	): Promise<AgentContinuationOutcome> {
 		if (signal?.aborted || this._disposed || this._disposing) return this._stoppedContinuationOutcome(signal);
+		if (this._continuationHold) return { kind: "finish" };
 		if (this.queuedActionCount > 0) return { kind: "finish" };
 		if (this._jobWatchController?.isParked()) return { kind: "wait_for_owned_work" };
 		const owner = this._captureGoalContinuationOwner(signal);
 		const arrivalEpoch = this._sessionInputArrivalEpoch;
 		const goalSnapshot = owner.goal;
 		const goalAccountingStartedAt = owner.accountingStartedAt;
+		const revision = this._autonomousRevision;
 		const autonomousState = this._autonomousState;
 		const autonomousSnapshot = structuredClone(autonomousState);
 		const cwd = this._cwd;
 		const autonomousOwnerIsCurrent = () =>
-			this._autonomousState === autonomousState && isDeepStrictEqual(autonomousState, autonomousSnapshot);
+			!this._continuationHold &&
+			this._autonomousRevision === revision &&
+			this._autonomousState === autonomousState &&
+			isDeepStrictEqual(autonomousState, autonomousSnapshot);
 		const goalOutcome = await this._getGoalContinuationMessages(context, signal, owner);
 		if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(signal);
 		if (goalOutcome.kind === "continue") {
@@ -4750,7 +4821,11 @@ export class AgentSession {
 		const candidate = structuredClone(autonomousSnapshot);
 		let autonomousMessage: AgentMessage | undefined;
 		try {
-			autonomousMessage = await nextAutonomousContinuation(candidate, context.message, { cwd, signal });
+			autonomousMessage = await nextAutonomousContinuation(candidate, context.message, {
+				cwd,
+				signal,
+				isCurrent: autonomousOwnerIsCurrent,
+			});
 		} catch (error) {
 			if (this._isGoalContinuationOwnerCurrent(owner) && autonomousOwnerIsCurrent()) {
 				this._restoreAutonomousRuntimeSnapshot(candidate);
@@ -5838,14 +5913,110 @@ export class AgentSession {
 		return autonomousStatus(this._autonomousState);
 	}
 
-	recordHostAutonomousContinuation(): void {
+	getContinuationStatus(): ContinuationStatus {
+		return this._continuationHold
+			? { status: "blocked_external", hold: { ...this._continuationHold } }
+			: { status: "ready" };
+	}
+
+	async blockContinuation(reason: string): Promise<ContinuationStatus> {
+		if (typeof reason !== "string" || !reason.trim()) throw new Error("Continuation blocker reason must be nonempty");
+		const hold: ContinuationHold = { kind: "external_blocker", reason: reason.trim() };
+		this._continuationHold = hold;
+		this._invalidateAutomaticContinuations(true);
+		await this.sessionManager.appendCustomEntry(CONTINUATION_HOLD_CUSTOM_TYPE, {
+			kind: CONTINUATION_HOLD_CUSTOM_TYPE,
+			hold,
+		});
+		return this.getContinuationStatus();
+	}
+
+	async resumeContinuation(): Promise<ContinuationStatus> {
+		const hold = this._continuationHold;
+		await this.sessionManager.appendCustomEntry(CONTINUATION_HOLD_CUSTOM_TYPE, {
+			kind: CONTINUATION_HOLD_CUSTOM_TYPE,
+			hold: null,
+		});
+		if (this._continuationHold === hold) this._continuationHold = undefined;
+		this._autonomousRevision++;
+		return this.getContinuationStatus();
+	}
+
+	getAutonomousRevision(): number {
+		return this._autonomousRevision;
+	}
+
+	private _invalidateAutomaticContinuations(clearGoal = false): void {
+		this._autonomousRevision++;
+		this._sessionInputArrivalEpoch++;
+		if (clearGoal) this._goalContinuationAwaitsRlmWork = false;
+		this._autonomousContinuationAwaitingRlmWork = undefined;
+		this._clearQueuedAutonomousContinuations();
+		const isAutomaticGoal = (message: AgentMessage) =>
+			message.role === "custom" &&
+			message.customType === GOAL_CONTEXT_CUSTOM_TYPE &&
+			(message.details as GoalContextDetails | undefined)?.kind === "continuation";
+		if (clearGoal) {
+			this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter((message) => !isAutomaticGoal(message));
+			this.agent.removeQueuedMessages(isAutomaticGoal);
+		}
+		this._cancelSessionActions(
+			(action) =>
+				action.payload.kind === "turn" &&
+				(action.payload.autonomousRevision !== undefined ||
+					(clearGoal &&
+						action.payload.customMessage?.customType === GOAL_CONTEXT_CUSTOM_TYPE &&
+						(action.payload.customMessage.details as GoalContextDetails | undefined)?.kind === "continuation")),
+			new Error("Automatic continuation invalidated before delivery"),
+		);
+	}
+
+	setAutonomousGates(commands: string[]): AgentAutonomousStatus {
+		if (!Array.isArray(commands) || commands.some((command) => typeof command !== "string")) {
+			throw new Error("Autonomous gates must be an array of command strings");
+		}
+		this._invalidateAutomaticContinuations();
+		this._autonomousState = {
+			...this._autonomousState,
+			gates: { ...this._autonomousState.gates, commands: [...commands] },
+			gateAttempts: {},
+			lastGateFailure: undefined,
+			lastGateFailureSnapshot: undefined,
+		};
+		return this.getAutonomousStatus();
+	}
+
+	recordHostAutonomousContinuation(expectedRevision = this._autonomousRevision): boolean {
+		if (
+			this._continuationHold ||
+			expectedRevision !== this._autonomousRevision ||
+			!this._autonomousState.enabled ||
+			autonomousLimitReason(this._autonomousState)
+		)
+			return false;
 		addAutonomousContinuation(this._autonomousState);
+		return true;
 	}
 
 	async refreshAutonomousGates(): Promise<void> {
-		await refreshAutonomousQualityGates(this._autonomousState, {
+		if (this._continuationHold) return;
+		const state = this._autonomousState;
+		const revision = this._autonomousRevision;
+		const original = structuredClone(state);
+		const candidate = structuredClone(state);
+		await refreshAutonomousQualityGates(candidate, {
 			cwd: this._cwd,
+			isCurrent: () =>
+				!this._continuationHold && this._autonomousRevision === revision && this._autonomousState === state,
 		});
+		if (
+			!this._continuationHold &&
+			this._autonomousRevision === revision &&
+			this._autonomousState === state &&
+			isDeepStrictEqual(state, original)
+		) {
+			this._restoreAutonomousRuntimeSnapshot(candidate);
+		}
 	}
 
 	private async _runWithAutonomousContinuationSuppressed<T>(fn: () => Promise<T>): Promise<T> {
@@ -6477,6 +6648,7 @@ export class AgentSession {
 				queueKey: options?.followUpQueueKey,
 				previewLabel: injectedMessagePreviewLabel(message),
 				suppressAutonomousContinuation: options?.suppressAutonomousContinuation,
+				autonomousRevision: options?.autonomousRevision,
 				resumeIfIdle:
 					!visibleQueued ||
 					options?.resumeIfIdle ||
@@ -6645,6 +6817,7 @@ export class AgentSession {
 					message: primaryMessage,
 					prefixMessages,
 					suppressAutonomousContinuation: options?.suppressAutonomousContinuation,
+					autonomousRevision: options?.autonomousRevision,
 					resumeIfIdle:
 						!visibleQueued ||
 						options?.resumeIfIdle ||
@@ -7125,6 +7298,7 @@ export class AgentSession {
 			prefixMessages?: CustomMessage[];
 			previewLabel?: string;
 			suppressAutonomousContinuation?: boolean;
+			autonomousRevision?: number;
 			resumeIfIdle?: boolean;
 			source?: InputSource | "internal";
 			executionPolicy?: TurnExecutionPolicy;
@@ -7146,6 +7320,7 @@ export class AgentSession {
 		const preview = options.previewLabel ? `${options.previewLabel}: ${text}` : undefined;
 		const payload: PreparedTurnPayload = {
 			kind: "turn",
+			autonomousRevision: options.autonomousRevision,
 			submitted: options.submitted,
 			selectedSkillRef: options.selectedSkillRef ? { ...options.selectedSkillRef } : undefined,
 			text,
@@ -7240,6 +7415,12 @@ export class AgentSession {
 		disposition: "starts_when_admitted" | "queued";
 		ticket?: ActionTicket;
 	} {
+		if (
+			action.payload.kind === "turn" &&
+			action.payload.autonomousRevision !== undefined &&
+			(this._continuationHold || action.payload.autonomousRevision !== this._autonomousRevision)
+		)
+			return { accepted: false, disposition: "queued" };
 		if (this._disposed || this._disposing) {
 			throw new Error("Cannot admit a session action because the session is disposing or disposed.");
 		}
@@ -7668,11 +7849,20 @@ export class AgentSession {
 
 	private async _startPreparedTurnActions(actions: QueuedSessionAction[], epoch: number): Promise<void> {
 		let nextTurnMessages: CustomMessage[] = [];
-		const activeTurns = () =>
-			actions.filter(
+		const activeTurns = () => {
+			this._cancelSessionActions(
+				(action) =>
+					action.payload.kind === "turn" &&
+					action.payload.autonomousRevision !== undefined &&
+					(Boolean(this._continuationHold) || action.payload.autonomousRevision !== this._autonomousRevision),
+				new Error("Automatic continuation invalidated before delivery"),
+				actions,
+			);
+			return actions.filter(
 				(action): action is SessionAction<PreparedTurnPayload> =>
 					action.payload.kind === "turn" && action.lifecycle.state === "preparing",
 			);
+		};
 		const firstTurn = activeTurns()[0];
 		if (!firstTurn) return;
 		const executionPolicy = firstTurn.payload.executionPolicy;
@@ -7880,6 +8070,16 @@ export class AgentSession {
 				case "autonomous":
 					await this._handleAutonomousSlashCommand(input.text);
 					break;
+				case "continuation": {
+					const args = parseSessionSlashCommand(input.text)?.args ?? "";
+					if (args.toLowerCase() === "resume") await this.resumeContinuation();
+					else if (/^block\s+/i.test(args)) await this.blockContinuation(args.replace(/^block\s+/i, ""));
+					else if (args && args.toLowerCase() !== "status")
+						throw new Error("Usage: /continuation [status|resume|block <reason>]");
+					const status = this.getContinuationStatus();
+					resultText = status.hold ? `blocked_external: ${status.hold.reason}` : "Continuation: ready";
+					break;
+				}
 			}
 			if (resultText) {
 				await this._appendDurableSessionCommandMessage(resultText, input.command, true, false, displayResult);
@@ -12183,6 +12383,11 @@ export class AgentSession {
 				provider: this.model?.provider ?? null,
 				input: this.model?.input ?? [],
 			}),
+		};
+		handlers.continuation_status = async () => ({ ...this.getContinuationStatus() });
+		handlers.continuation_block = async (payload) => {
+			if (typeof payload.reason !== "string") throw new Error("Continuation blocker reason must be a string");
+			return { ...(await this.blockContinuation(payload.reason)) };
 		};
 		if (this._includeGoals) {
 			for (const type of ["goal.get", "goal.create", "goal.complete"]) {

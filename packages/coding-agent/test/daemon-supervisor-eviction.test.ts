@@ -356,6 +356,7 @@ describe("daemon supervisor whole-tree eviction", () => {
 		expect(supervisor.createOrReuseWorker).toHaveBeenCalledWith(
 			"viewer",
 			expect.objectContaining({ sessionPath: "/tmp/saved.jsonl" }),
+			undefined,
 		);
 		expect(response).toMatchObject({
 			success: true,

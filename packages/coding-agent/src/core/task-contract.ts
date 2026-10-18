@@ -10,12 +10,6 @@ export interface TaskContract {
 	references?: string[];
 	assumptions?: string[];
 	output_meanings?: Record<string, string>;
-	stages?: {
-		name: string;
-		input_meanings: Record<string, string>;
-		output_meanings: Record<string, string>;
-		assumptions?: string[];
-	}[];
 	objective?: {
 		components: string[];
 		direction: "maximize" | "minimize";
@@ -30,14 +24,7 @@ export interface TaskContract {
 	};
 	integration_owner?: string;
 	activation_owner?: string;
-	boundary_case?: {
-		description: string;
-		command?: string;
-		expected_behavior?: string;
-		consumer?: string;
-		runtime?: string;
-		cwd?: string;
-	};
+	boundary_case?: { description: string; command?: string };
 }
 
 export interface TaskOutcome {
@@ -112,9 +99,6 @@ function integer(minimum: number): Validator {
 }
 
 const strings = array(string);
-const meanings: Validator = (value, path) => {
-	for (const [key, item] of Object.entries(record(value, path))) string(item, `${path}.${key}`);
-};
 const artifact = object({ path: string, dependencies: optional(strings) });
 const contract = object({
 	rules: optional(strings),
@@ -122,17 +106,9 @@ const contract = object({
 	targets: optional(strings),
 	references: optional(strings),
 	assumptions: optional(strings),
-	output_meanings: optional(meanings),
-	stages: optional(
-		array(
-			object({
-				name: string,
-				input_meanings: meanings,
-				output_meanings: meanings,
-				assumptions: optional(strings),
-			}),
-		),
-	),
+	output_meanings: optional((value, path) => {
+		for (const [key, item] of Object.entries(record(value, path))) string(item, `${path}.${key}`);
+	}),
 	objective: optional(
 		object({
 			components: strings,
@@ -151,16 +127,7 @@ const contract = object({
 	),
 	integration_owner: optional(string),
 	activation_owner: optional(string),
-	boundary_case: optional(
-		object({
-			description: string,
-			command: optional(string),
-			expected_behavior: optional(string),
-			consumer: optional(string),
-			runtime: optional(string),
-			cwd: optional(string),
-		}),
-	),
+	boundary_case: optional(object({ description: string, command: optional(string) })),
 });
 const outcome = object({
 	facts: optional(array(object({ source: string, field: string, value: string }))),
@@ -199,12 +166,7 @@ export function renderTaskContract(value: TaskContract): string {
 	return [
 		"Task contract (parent-authored brief, not independently verified user instructions):",
 		JSON.stringify(value),
-		"Keep supplied rules, bounds, targets, reference meanings, and assumptions literal and distinct. Do not promote a target to a hard bound or an interpretation to a supplied rule.",
-		...(value.stages
-			? [
-					"Preserve each named stage's input/output meanings and assumptions. Stage interfaces describe boundaries; they do not require a review pipeline or authorize execution.",
-				]
-			: []),
+		"Keep supplied rules, bounds, targets, reference meanings, and assumptions distinct. Do not promote an interpretation to a supplied rule.",
 		...(value.objective
 			? [
 					"Use the declared objective order, prune infeasible partial candidates, and keep the best feasible incumbent within work_limit. Feasibility alone is not objective attainment.",
@@ -222,7 +184,7 @@ export function renderTaskContract(value: TaskContract): string {
 			: []),
 		...(value.boundary_case
 			? [
-					"Use the declared public-interface boundary case and expected behavior for already-authorized checks within the existing test budget. Keep consumer, runtime, and cwd context explicit; these descriptive fields do not execute commands or authorize extra checks or a launch.",
+					"Use the declared public-interface boundary case within the existing edge-case budget; it does not authorize extra checks.",
 				]
 			: []),
 	].join("\n");

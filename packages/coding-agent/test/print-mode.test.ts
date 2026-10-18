@@ -42,7 +42,9 @@ type FakeSession = {
 	prompt: ReturnType<typeof vi.fn>;
 	promptAndWait: ReturnType<typeof vi.fn>;
 	reload: ReturnType<typeof vi.fn>;
-	getAutonomousStatus: ReturnType<typeof vi.fn>;
+	getAutonomousStatus: ReturnType<typeof vi.fn<() => AgentAutonomousStatus>>;
+	getAutonomousRevision: ReturnType<typeof vi.fn>;
+	getContinuationStatus: ReturnType<typeof vi.fn>;
 	recordHostAutonomousContinuation: ReturnType<typeof vi.fn>;
 	refreshAutonomousGates: ReturnType<typeof vi.fn>;
 };
@@ -116,7 +118,9 @@ function createRuntimeHost(
 		promptAndWait: vi.fn(async () => {}),
 		reload: vi.fn(async () => {}),
 		getAutonomousStatus: vi.fn(() => autonomousStatus),
-		recordHostAutonomousContinuation: vi.fn(),
+		getAutonomousRevision: vi.fn(() => 0),
+		getContinuationStatus: vi.fn(() => ({ status: "ready" })),
+		recordHostAutonomousContinuation: vi.fn(() => true),
 		refreshAutonomousGates: vi.fn(),
 	};
 
@@ -137,6 +141,126 @@ afterEach(() => {
 });
 
 describe("runPrintMode", () => {
+	it.each(["text", "json"] as const)(
+		"waits for owned work before reporting an external hold in %s mode",
+		async (mode) => {
+			const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "Partial result retained" }));
+			const { session } = runtimeHost;
+			session.getContinuationStatus.mockReturnValue({
+				status: "blocked_external",
+				hold: { kind: "external_blocker", reason: "Waiting for approval" },
+			});
+			let finishOwnedWork!: () => void;
+			session.waitForRlmQuiescence.mockImplementationOnce(
+				() =>
+					new Promise<void>((resolve) => {
+						finishOwnedWork = resolve;
+					}),
+			);
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+			output.write.mockClear();
+
+			const run = runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], { mode });
+			await vi.waitFor(() => expect(session.waitForRlmQuiescence).toHaveBeenCalled());
+			expect(runtimeHost.dispose).not.toHaveBeenCalled();
+			expect(session.prompt).not.toHaveBeenCalled();
+			finishOwnedWork();
+			const exitCode = await run;
+
+			expect(exitCode).toBe(1);
+			expect(errorSpy).toHaveBeenCalledWith("blocked_external: Waiting for approval");
+			expect(session.waitForRlmQuiescence).toHaveBeenCalledBefore(runtimeHost.dispose);
+			expect(session.prompt).not.toHaveBeenCalled();
+			expect(session.recordHostAutonomousContinuation).not.toHaveBeenCalled();
+			expect(session.refreshAutonomousGates).not.toHaveBeenCalled();
+			if (mode === "text") expect(output.write).toHaveBeenCalledWith("Partial result retained\n");
+		},
+	);
+
+	it.each(["quiescence", "prompt", "idle", "admission", "backoff"] as const)(
+		"honors an external hold acquired during %s",
+		async (boundary) => {
+			const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "Partial result" }), {
+				enabled: true,
+				continuationsUsed: 0,
+				turnsUsed: 1,
+				tokensUsed: 100,
+				limits: { maxContinuations: 3, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
+				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
+				gateAttempts: { "verify-public": 1 },
+				lastGateFailure: { command: "verify-public", attempt: 1, exitText: "exited 1", output: "failed" },
+			});
+			const { session } = runtimeHost;
+			const hold = () =>
+				session.getContinuationStatus.mockReturnValue({
+					status: "blocked_external",
+					hold: { kind: "external_blocker", reason: "Dependency unavailable" },
+				});
+			if (boundary === "quiescence")
+				session.waitForRlmQuiescence.mockImplementationOnce(async () => {
+					hold();
+				});
+			if (boundary === "prompt") {
+				session.waitForRlmQuiescence = vi.fn(async () => {});
+				session.prompt.mockImplementationOnce(async () => {
+					hold();
+				});
+			}
+			if (boundary === "idle") {
+				session.waitForIdle.mockImplementationOnce(async () => {});
+				session.waitForIdle.mockImplementationOnce(async () => {
+					hold();
+				});
+			}
+			if (boundary === "admission")
+				session.recordHostAutonomousContinuation.mockImplementationOnce(() => {
+					hold();
+					return false;
+				});
+			if (boundary === "backoff") {
+				const status = session.getAutonomousStatus();
+				session.getAutonomousStatus.mockReturnValueOnce(status).mockImplementationOnce(() => {
+					queueMicrotask(hold);
+					return status;
+				});
+			}
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+			const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+				mode: "text",
+			});
+
+			expect(exitCode).toBe(1);
+			expect(errorSpy).toHaveBeenCalledWith("blocked_external: Dependency unavailable");
+			expect(session.prompt).toHaveBeenCalledTimes(
+				boundary === "prompt" || boundary === "idle" || boundary === "backoff" ? 1 : 0,
+			);
+			expect(session.recordHostAutonomousContinuation).toHaveBeenCalledTimes(boundary === "quiescence" ? 0 : 1);
+			expect(session.refreshAutonomousGates).toHaveBeenCalledTimes(boundary === "backoff" ? 1 : 0);
+			if (boundary === "prompt") {
+				expect(session.waitForRlmQuiescence).toHaveBeenCalledTimes(2);
+				expect(session.waitForRlmQuiescence).toHaveBeenCalledBefore(runtimeHost.dispose);
+			}
+		},
+	);
+
+	it("discards a stale autonomous revision after waiting for idle", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
+		const { session } = runtimeHost;
+		session.waitForRlmQuiescence.mockImplementationOnce(async () => {
+			session.getAutonomousRevision.mockReturnValue(1);
+		});
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+		});
+
+		expect(exitCode).toBe(0);
+		expect(session.waitForRlmQuiescence).toHaveBeenCalledTimes(2);
+		expect(session.recordHostAutonomousContinuation).not.toHaveBeenCalled();
+		expect(session.prompt).not.toHaveBeenCalled();
+	});
+
 	it("emits session_shutdown in text mode", async () => {
 		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
 		const { session } = runtimeHost;
@@ -811,6 +935,7 @@ describe("runPrintMode", () => {
 			streamingBehavior: "followUp",
 			internalPrompt: true,
 			suppressAutonomousContinuation: true,
+			autonomousRevision: 0,
 		});
 		expect(session.prompt.mock.calls[1][0]).toContain("Autonomous quality gate failed (attempt 2/3)");
 		expect(session.prompt.mock.calls[1][0]).toContain("0/9 summary");
@@ -818,6 +943,7 @@ describe("runPrintMode", () => {
 			streamingBehavior: "followUp",
 			internalPrompt: true,
 			suppressAutonomousContinuation: true,
+			autonomousRevision: 0,
 		});
 	});
 
