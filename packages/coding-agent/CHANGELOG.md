@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.1.14] - 2026-10-18
+
+- Fixed owned-session shutdown reporting a timeout before normal worker cleanup finishes.
+
 ## [1.1.13] - 2026-10-18
 
 - Changed the default prompts and task guidance back to v1.1.11.
