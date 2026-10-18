@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.13] - 2026-10-18
+
+- Changed the default prompts and task guidance back to v1.1.11.
+- Added explicit continuation holds for external blockers without completing the active goal.
+- Added live autonomous gate replacement without resetting run budgets.
+- Fixed reopening sessions with pending tool continuations.
+- Fixed session catalog reads failing when an index worker exits before its final reply is read.
+- Improved session-creation timeouts to report the last observed startup phase when supported by the daemon.
+
 ## [1.1.12] - 2026-10-17
 
 - Changed solving and delegation guidance to preserve literal requirements, use neutral analytical briefs, and check behavior at the real consumer boundary.
