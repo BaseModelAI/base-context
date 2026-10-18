@@ -222,6 +222,9 @@ const WORKER_RETRY_DELAYS_MS = [250, 1000, 5000] as const;
 const DEFERRED_RECOVERY_RECHECK_MS = 5000;
 // ~2.5 minutes of probing: each round is one 5s defer recheck plus a ~11s three-delay probe pass.
 const MAX_DEFERRED_RECOVERY_ROUNDS = 10;
+// Bounded process-exit observation, not a teardown guarantee. The 5s shutdown
+// request plus this wait leaves 5s within the client's default 30s timeout.
+const WORKER_GRACEFUL_STOP_TIMEOUT_MS = 20_000;
 const STOP_FINALIZATION_RECHECK_MS = 250;
 const STOP_FINALIZATION_SIGKILL_GRACE_MS = 5000;
 const STOP_FINALIZATION_RETRY_MS = 5000;
@@ -7067,7 +7070,7 @@ export class DaemonSupervisor {
 			}
 			return identityVerdict !== "replaced" && identityVerdict !== "gone";
 		};
-		const gracefulDeadline = Date.now() + (force ? 500 : 2000);
+		const gracefulDeadline = Date.now() + (force ? 500 : WORKER_GRACEFUL_STOP_TIMEOUT_MS);
 		while (isWorkerProcessAlive() && Date.now() < gracefulDeadline) {
 			await delay(25);
 		}
