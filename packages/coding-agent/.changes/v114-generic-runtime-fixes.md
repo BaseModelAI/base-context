@@ -3,3 +3,4 @@
 - Fixed timed child passivation overlooking known pending completion work.
 - Improved invalid installed-skill API errors with real callable names and canonical help instead of misleading spelling guesses.
 - Improved invalid task-contract field errors to list the supported fields.
+- Clarified that negative findings apply only to the examined scope and that proxy-driven work must start from a representative result at the required interface.

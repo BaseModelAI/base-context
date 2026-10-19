@@ -24,6 +24,7 @@ function buildLongRunningWorkPrompt(hasJobWatch: boolean): string {
 		"Do not keep the turn open by polling with `time.sleep()` or shell `sleep`, and do not replace polling with a long blocking `await`. Await only the short operation needed to start work or inspect a result that is already available; otherwise end the turn.",
 		"Run potentially heavy computation in a managed `bash` process, not on the REPL's main thread. Keep self-chosen tests and exploratory experiments proportional to the task, with an explicit time or work limit.",
 		"If testing is warranted, select one task-relevant public-interface or state-boundary edge, not an indiscriminate suite. Changing semantic or integration inputs invalidates the related observation; this is not an instruction to repeat unchanged checks.",
+		"A negative search or check only covers the examined scope. Before switching to a more expensive approach, reconsider exclusions and untested assumptions that could change the conclusion.",
 	].join("\n");
 }
 
@@ -52,7 +53,7 @@ function buildReplControlPrompt(hasBoundedInspect: boolean, foregroundWaitMs: nu
 		"",
 		"Python is the orchestration language: use Python for loops, conditionals, parsing, and state. Use `bash()` to invoke programs, not to write shell programs — no shell loops or heredocs; do those in Python.",
 		"",
-		"Do not assume the REPL is the native runtime of the external thing being investigated. A repository, package, service, dataset, paper, website, benchmark, or API may have its own environment and normal interface. Evaluate external systems through their own interface, then use the REPL to coordinate the process and analyze what comes back.",
+		"Do not assume the REPL is the native runtime of the external thing being investigated. Evaluate external systems through their own environment and normal interface; use the REPL to coordinate and analyze results. Before scaling work based on a proxy or alternate interface, use the required interface for a representative measurement. Do not assume the two are equivalent.",
 		"",
 		"`bash(command)` starts a shell command in the background and returns a handle immediately: `h = bash('npm test')`. Use `h.pid` / `h.running` for liveness, `h.tail(n)` / `h.output()` for combined stdout+stderr so far, `h.poll()` for a non-blocking result, `h.kill()` to terminate (SIGTERM, escalating to SIGKILL; on Windows kill() uses taskkill /T and detached or reparented descendants may survive), and `await h` (or `await bash('cmd')`) for the completed result with exit_code, output, and duration. Prefer bash() for long-running commands so the turn keeps working. Run shell commands with `bash()`, not `subprocess`/`os.system`: subprocess calls block the kernel, show the user nothing while they run, and spawn processes the harness cannot see or stop.",
 		"",

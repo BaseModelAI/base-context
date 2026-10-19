@@ -4,7 +4,7 @@
 
 On the same 62 naturally completed tasks, v1.1.14 scored 28/62 (45.16%), versus 64/124 (51.61%) across the two v1.1.11 attempts. Estimated model cost rose from $1.4744 to $1.5980 per task (+8.38%); mean agent time rose 1.06%. Failed natural outcomes remain included. These are observed results, not a statistical attribution to individual source changes.
 
-The net extra cost was $7.6641 across the cohort. Three tasks contributed $12.1785 before savings elsewhere. Aggregate cache-hit fractions were approximately 93.06% and 93.04%; missing-cost imputation contributed only $0.0137 to the new run. Neither an aggregate cache collapse nor the new-run estimate explains the increase. Control-tagged requests also contain substantive solving work, so they cannot all be counted as avoidable overhead.
+The net extra cost was $7.6641 across the cohort. Three tasks contributed $12.1785 before savings elsewhere. The pooled cache-hit rate was nearly unchanged, but that hid within-task changes: 37 of 62 tasks had lower cache-hit fractions. The subsequent [paired cost investigation](v114-cost-cause.md) separates those effects and finds request growth to be the main accounting driver. The original five repairs below do not address most of that additional solving work; they must not be presented as recovery of the cost regression.
 
 The selected repairs address concrete runtime or interface mechanisms. None contains benchmark names, answers, exclusions, verifier changes, dependency restrictions, or new solving prompts. Incorrect task outputs were investigated, but these changes do not establish recovery of the accuracy or cost regression.
 
