@@ -2,12 +2,15 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { JobWatchController } from "../src/core/job-watch.js";
 import { ReplKernelManager } from "../src/core/kernel/index.js";
 
 const python = process.env.BASE_CONTEXT_KERNEL_PYTHON ?? resolve("../../prime-agent-runtime/.venv/bin/python");
 const managers: ReplKernelManager[] = [];
+const controllers: JobWatchController[] = [];
 const directories: string[] = [];
 afterEach(async () => {
+	for (const controller of controllers.splice(0)) controller.dispose();
 	for (const manager of managers.splice(0)) await manager.shutdown({ snapshot: false });
 	for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
@@ -18,6 +21,42 @@ function create(hostHandlers = {}) {
 	managers.push(manager);
 	return { manager, cwd };
 }
+function createControllerBridge() {
+	let complete!: () => void;
+	const completion = new Promise<void>((resolve) => {
+		complete = resolve;
+	});
+	const observations: Record<string, unknown>[] = [];
+	const controller = new JobWatchController({
+		sessionId: "registration",
+		current: () => true,
+		goalId: () => undefined,
+		probe: async () => {},
+		cancelProbe: () => {},
+		persist: async () => {},
+		admit: () => false,
+		onError: (error) => {
+			throw error;
+		},
+	});
+	controllers.push(controller);
+	const { manager } = create({
+		"job_watch.watch": (payload: Record<string, unknown>) => controller.watch(payload),
+		"job_watch.status": async (payload: Record<string, unknown>) => controller.status(String(payload.id)),
+		"job_watch.consume": (payload: Record<string, unknown>) => controller.consume(String(payload.id)),
+		"job_watch.observation": async (payload: Record<string, unknown>) => {
+			observations.push(payload);
+			await controller.observe({
+				...(payload.result as Record<string, unknown>),
+				id: payload.id,
+				generation: payload.generation,
+			});
+			complete();
+			return {};
+		},
+	});
+	return { manager, controller, completion, observations };
+}
 const skillSource = resolve("skills/job-watch/src");
 const load = `import sys
 sys.path.insert(0, ${JSON.stringify(skillSource)})
@@ -26,6 +65,46 @@ from rlm import bash
 import asyncio`;
 
 describe("job-watch native kernel bridge", () => {
+	it("returns settled handle status at registration without consuming terminal evidence", async () => {
+		const { manager, controller, observations } = createControllerBridge();
+		const registered = await manager.execute(`${load}
+job = bash("printf done")
+finished = await job
+assert finished.exit_code == 0
+w = await job_watch.watch(job, job_id="settled", completion_source="handle")
+assert w["state"] == "succeeded", w
+assert w["active"] is False
+assert w["pending_events"] == 1
+assert w["progress"]["exit_code"] == 0`);
+		expect(registered.status, JSON.stringify(registered)).toBe("ok");
+		expect(observations).toHaveLength(1);
+		expect(controller.snapshot().watches[0].pending).toHaveLength(1);
+		const consumed = await manager.execute(`events = await job_watch.consume(w["id"])
+assert len(events["events"]) == 1
+assert events["events"][0]["state"] == "succeeded"
+assert events["events"][0]["progress"]["exit_code"] == 0`);
+		expect(consumed.status, JSON.stringify(consumed)).toBe("ok");
+		expect(controller.snapshot().watches[0].pending).toHaveLength(0);
+	});
+	it("returns immediately for a running handle and keeps one callback across duplicate registration", async () => {
+		const { manager, controller, completion, observations } = createControllerBridge();
+		const registered = await manager.execute(`${load}
+job = bash(${JSON.stringify(`${python} -c "import threading; threading.Event().wait(60)"`)})
+w = await asyncio.wait_for(job_watch.watch(job, job_id="running", completion_source="handle"), 1)
+again = await asyncio.wait_for(job_watch.watch(job, job_id="running", completion_source="handle"), 1)
+assert w["state"] == again["state"] == "running"
+assert w["id"] == again["id"]
+assert w["active"] is True and w["pending_events"] == 0
+assert not job._released`);
+		expect(registered.status, JSON.stringify(registered)).toBe("ok");
+		expect(observations).toHaveLength(0);
+		const stopped = await manager.execute("job.kill(grace=0)");
+		expect(stopped.status, JSON.stringify(stopped)).toBe("ok");
+		await completion;
+		expect(observations).toHaveLength(1);
+		const watch = controller.snapshot().watches[0];
+		expect(controller.status(watch.id)).toMatchObject({ active: false, state: "failed", pending_events: 1 });
+	});
 	it("delivers completion after the initiating cell and transfers reports through the thin skill API", async () => {
 		let complete!: (value: Record<string, unknown>) => void;
 		const completion = new Promise<Record<string, unknown>>((resolve) => {

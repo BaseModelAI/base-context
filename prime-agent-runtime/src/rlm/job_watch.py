@@ -15,7 +15,7 @@ from .bash import BashHandle, BashResult, bash
 _identities: weakref.WeakKeyDictionary[BashHandle, str] = weakref.WeakKeyDictionary()
 _handles: weakref.WeakValueDictionary[str, BashHandle] = weakref.WeakValueDictionary()
 _results: weakref.WeakKeyDictionary[BashHandle, BashResult] = weakref.WeakKeyDictionary()
-_callbacks: dict[tuple[str, str], Callable[[], None]] = {}
+_callbacks: dict[tuple[str, str], tuple[Callable[[], None], asyncio.Future[None]]] = {}
 _probes: dict[str, asyncio.Task[None]] = {}
 
 
@@ -37,12 +37,14 @@ def _observed(job_id: str, result: BashResult | None) -> dict[str, Any]:
     }
 
 
-def bind(handle: BashHandle, watch_id: str, generation: str, job_id: str) -> None:
+def bind(handle: BashHandle, watch_id: str, generation: str, job_id: str) -> asyncio.Future[None] | None:
+    """Return a relay receipt only when the handle already has a completed result."""
     from . import host_request
     loop = asyncio.get_running_loop()
     key = (watch_id, generation)
     if key in _callbacks:
-        return
+        return _callbacks[key][1] if handle in _results else None
+    relayed: asyncio.Future[None] = loop.create_future()
 
     async def deliver(observation: dict[str, Any]) -> None:
         try:
@@ -52,6 +54,9 @@ def bind(handle: BashHandle, watch_id: str, generation: str, job_id: str) -> Non
             })
         except RuntimeError:
             pass  # Host teardown owns recovery; never restart a monitored process.
+        finally:
+            if not relayed.done():
+                relayed.set_result(None)
 
     def completed(result: BashResult) -> None:
         _results[handle] = result
@@ -61,13 +66,14 @@ def bind(handle: BashHandle, watch_id: str, generation: str, job_id: str) -> Non
         except RuntimeError:
             pass
 
-    _callbacks[key] = handle.add_done_callback(completed)
+    _callbacks[key] = (handle.add_done_callback(completed), relayed)
+    return relayed if handle in _results else None
 
 
 def unbind(watch_id: str) -> None:
     for key in list(_callbacks):
         if key[0] == watch_id:
-            _callbacks.pop(key)()
+            _callbacks.pop(key)[0]()
 
 
 _SAFE_INTEGER = 2**53 - 1

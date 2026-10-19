@@ -55,6 +55,14 @@ This is an evidence-motivated input correction, **not a measured recovery of acc
 
 Local validation passed: `npm run check`, `npm run build:source`, and a native public prompt-builder call at root and child depths. Both generated prompts contain the new guidance. This checks delivery, not behavioral effectiveness.
 
+## Completed-job registration
+
+A concrete native state boundary was also repaired. `watch()` previously returned the initial `running` snapshot even when its handle already had a settled result; the completion callback only scheduled delivery afterward. Registration now waits for that already-ready result to reach the host and returns the current cached status. It does not wait for running or unsettled jobs.
+
+Terminal events remain pending for normal delivery or explicit consumption. No parking behavior, report, watch limit, public keyword, or daemon wire shape changes. This avoids telling the model to wait on work whose completion is already known; it does not eliminate every legitimate park/consume sequence or establish a dollar saving for all observed false parks.
+
+Validation passed with 64 tests across the existing watch controller, system prompt, and native kernel watch files (22, 27, and 15 respectively; no skips), plus the current source build and repository checks. The native kernel cases cover ready terminal evidence and nonblocking running/duplicate registrations.
+
 ## Evidence
 
 Retained runs under `benchmarks/terminal-bench/jobs/`:

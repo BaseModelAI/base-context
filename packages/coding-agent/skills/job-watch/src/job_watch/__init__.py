@@ -1,5 +1,6 @@
 """Monitor authorized jobs without model polling. Launch with bash(), not this skill."""
 from __future__ import annotations
+import asyncio
 from datetime import datetime, timedelta, timezone
 import json
 import math
@@ -54,7 +55,10 @@ async def watch(
         "report_every": report_every, "deadline": deadline, "timeout_ms": probe_timeout * 1000,
     })
     if job is not None and completion_source == "handle":
-        _runtime.bind(job, result["id"], result["generation"], job_id or resource)
+        relayed = _runtime.bind(job, result["id"], result["generation"], job_id or resource)
+        if relayed is not None:
+            await asyncio.shield(relayed)
+            return await status(result["id"])
     return result
 
 
