@@ -17,7 +17,7 @@ Give your agent a workspace, not just a conversation. Base Context combines **pe
 On **macOS or Linux**:
 
 ```bash
-curl -fsSL https://github.com/BaseModelAI/base-context/releases/download/v1.1.14/install.sh | bash -s -- 1.1.14
+curl -fsSL https://github.com/BaseModelAI/base-context/releases/download/v1.1.15/install.sh | bash -s -- 1.1.15
 ```
 
 The installer offers missing prerequisites and prepares Node.js, `uv`, and managed Python. Run the final PATH command it prints, then:
@@ -29,7 +29,7 @@ base-context
 
 **Bring your existing provider account.** Choose **`/login`**, then **`/model`** and **`/effort`**. Have ChatGPT with Codex access? Choose **OpenAI Codex** in `/login`—no separate API key needed. Other supported subscriptions and API keys are available through their provider routes. [Provider setup](packages/coding-agent/docs/providers.md).
 
-This page describes **1.1.3**; the installer command above is pinned to **1.1.14**. The npm alternative below uses the latest public release. [What's new](packages/coding-agent/docs/release-notes-1.1.3.md).
+This page describes **1.1.3**; the installer command above is pinned to **1.1.15**. The npm alternative below uses the latest public release. [What's new](packages/coding-agent/docs/release-notes-1.1.3.md).
 
 <details>
 <summary>Prefer npm, Windows, or a source build?</summary>
