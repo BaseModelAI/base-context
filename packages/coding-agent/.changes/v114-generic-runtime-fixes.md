@@ -1,0 +1,5 @@
+- Fixed watch capacity exhaustion after terminal evidence has been drained, while retaining cached results and pending reports.
+- Fixed empty idle-eviction sweeps blocking unrelated daemon mutations.
+- Fixed timed child passivation overlooking known pending completion work.
+- Improved invalid installed-skill API errors with real callable names and canonical help instead of misleading spelling guesses.
+- Improved invalid task-contract field errors to list the supported fields.

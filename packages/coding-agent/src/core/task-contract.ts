@@ -76,7 +76,11 @@ function object(fields: Record<string, Validator>): Validator {
 	return (value, path) => {
 		const data = record(value, path);
 		for (const key of Object.keys(data)) {
-			if (!Object.hasOwn(fields, key)) throw new Error(`${path}.${key} is not supported`);
+			if (!Object.hasOwn(fields, key)) {
+				throw new Error(
+					`${path}.${key} is not supported. Supported fields at ${path}: ${Object.keys(fields).join(", ")}.`,
+				);
+			}
 		}
 		for (const [key, validate] of Object.entries(fields)) validate(data[key], `${path}.${key}`);
 	};

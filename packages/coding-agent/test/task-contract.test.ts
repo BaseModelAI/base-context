@@ -88,6 +88,9 @@ describe("optional task contracts and outcomes", () => {
 			{ boundary_case: { description: "case", retry: true } },
 		])
 			expect(() => normalizeTaskContract(value)).toThrow();
+		expect(() => normalizeTaskContract({ delivery: { ...contract.delivery, dependencies: ["helper.py"] } })).toThrow(
+			"task_contract.delivery.dependencies is not supported. Supported fields at task_contract.delivery: workspace, consumer_root, mode, files.",
+		);
 		expect(() => normalizeTaskOutcome({ facts: [{ source: "file", field: "value", value: 100 }] })).toThrow(
 			"value must be a string",
 		);

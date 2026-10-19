@@ -1202,7 +1202,7 @@ export class DaemonSupervisor {
 					}
 				}),
 		);
-		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
+		if (this.shuttingDown || this.updateRestartPhase !== undefined || candidates.length === 0) return;
 
 		await this.withEvictionFence("Timed out draining daemon mutations for idle eviction", async () => {
 			if (this.shuttingDown || this.updateRestartPhase !== undefined) return;

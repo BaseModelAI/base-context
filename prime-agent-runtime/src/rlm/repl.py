@@ -494,15 +494,51 @@ def _safe_str(exc: BaseException) -> str:
         return "<exception str() failed>"
 
 
+def _skill_attribute_guidance(exc: BaseException) -> str | None:
+    if not isinstance(exc, AttributeError) or not isinstance(exc.obj, types.ModuleType):
+        return None
+    module = exc.obj
+    frame = exc.__traceback__
+    while frame is not None:
+        installed = frame.tb_frame.f_globals.get("_PRIME_AGENT_INSTALLED_SKILLS")
+        skill_name = installed.get(module) if isinstance(installed, dict) else None
+        if isinstance(skill_name, str):
+            module_name = vars(module)["__name__"]
+            names = sorted(
+                name for name, value in vars(module).items()
+                if not name.startswith("_") and callable(value)
+                and getattr(value, "__module__", "").split(".")[0] == module_name.split(".")[0]
+            )
+            api = ", ".join(names[:16]) or "none declared in this module"
+            if len(names) > 16:
+                api += ", ..."
+            selection = json.dumps({"action": "skill", "name": skill_name})
+            return _bounded_text(
+                f"Installed Python skill {skill_name!r} ({module_name}). "
+                f"Public callable names: {api}. "
+                f"Select its canonical API with prime_context {selection}; "
+                f"inspect a callable with help({module_name}).",
+                2048,
+            )
+        frame = frame.tb_next
+    return None
+
+
 def _error_event(cell_id: str, exc: BaseException) -> dict[str, Any]:
     # No cell frame (e.g. SyntaxError): exception-only keeps filename, source, and caret.
     te = traceback.TracebackException.from_exception(exc)
+    guidance = _skill_attribute_guidance(exc)
+    if guidance:
+        # Python's spelling hint can recommend the opposite operation (register -> unregister).
+        te._str = _safe_str(exc)
     stack = _cell_stack(te.stack)
     if stack is None:
-        lines = traceback.format_exception_only(type(exc), exc)
+        lines = list(te.format_exception_only()) if guidance else traceback.format_exception_only(type(exc), exc)
     else:
         te.stack = stack
         lines = list(te.format())
+    if guidance:
+        lines.append(guidance + "\n")
     return {
         "event": "error",
         "id": cell_id,

@@ -2967,7 +2967,11 @@ export class AgentDaemon {
 				(admission) => admission.activeSessionId === state.activeSessionId && admission.status !== "cancelled",
 			) || state.runtime.session.hasPendingAdmissionWaiters;
 		return {
-			isSessionActive: summary.isSessionActive || summary.hasRunningRlmChildren === true || hasPendingAdmission,
+			isSessionActive:
+				summary.isSessionActive ||
+				summary.hasRunningRlmChildren === true ||
+				hasPendingAdmission ||
+				state.runtime.session.getCompletionBlockers().length > 0,
 			attachedClients: state.clients.size + state.pendingAttaches,
 			hasRegisteredCronJob: jobs.some((job) => !isHeartbeatCronJob(job)),
 			lastActivityAt: Date.parse(summary.lastActivityAt ?? ""),

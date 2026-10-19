@@ -104,6 +104,18 @@ function strings(value: unknown, name: string): string[] {
 	if (!Array.isArray(value) || value.length > 16) throw new Error(`${name} must contain at most 16 strings`);
 	return value.map((v) => text(v, name));
 }
+function occupiesWatchSlot(watch: unknown): boolean {
+	if (!record(watch)) return true;
+	const state = record(watch.latest) ? watch.latest.state : undefined;
+	return (
+		!watch.unregistered &&
+		(watch.active !== false ||
+			typeof state !== "string" ||
+			!TERMINAL.has(state) ||
+			!Array.isArray(watch.pending) ||
+			watch.pending.length > 0)
+	);
+}
 function interval(value: unknown, name: string): number {
 	const schedule = parseAgentCronSchedule(normalizeHeartbeatSchedule(text(value, name))).schedule;
 	if (schedule.kind !== "interval" || !schedule.intervalMs) throw new Error(`${name} must be a recurring interval`);
@@ -225,8 +237,10 @@ export class JobWatchController {
 					throw new Error("Watch belongs to a different goal; unregister it first");
 				return this.status(existing.id);
 			}
-			if (this.registeredWatches().length >= MAX_WATCHES)
-				throw new Error("Unregister an old watch before registering more than 16 watches");
+			if ([...this.watches.values()].filter(occupiesWatchSlot).length >= MAX_WATCHES)
+				throw new Error(
+					"Consume completed evidence or unregister an old watch before registering more than 16 active or unresolved watches",
+				);
 			const source = input.completion_source;
 			if (source !== "handle" && source !== "probe")
 				throw new Error('completion_source must be "handle" or "probe"');
@@ -737,7 +751,7 @@ export class JobWatchController {
 			value.session_id !== this.hooks.sessionId ||
 			value.session_file !== this.hooks.sessionFile ||
 			!Array.isArray(value.watches) ||
-			value.watches.filter((watch) => !record(watch) || !watch.unregistered).length > MAX_WATCHES
+			value.watches.filter(occupiesWatchSlot).length > MAX_WATCHES
 		)
 			return;
 		this.unavailable = typeof value.unavailable === "string" ? value.unavailable : undefined;

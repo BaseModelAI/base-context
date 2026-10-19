@@ -90,8 +90,8 @@ except Exception as _prime_agent_rlm_error:
 
 export function buildRlmBootstrapCode(pythonSkills: readonly PythonSkillRuntimeInfo[] = []): string {
 	const baseCode = [RLM_BOOTSTRAP_HEADER_CODE, RLM_BOOTSTRAP_RUNTIME_CODE].join("\n\n");
-	const importNames = [...new Set(pythonSkills.map((skill) => skill.importName))];
-	if (importNames.length === 0) {
+	const skillNames = Object.fromEntries(pythonSkills.map((skill) => [skill.importName, skill.name]));
+	if (Object.keys(skillNames).length === 0) {
 		return baseCode;
 	}
 
@@ -147,12 +147,14 @@ def _prime_agent_wrap_skill_module(module):
     return wrapped
 
 _PRIME_AGENT_SKILL_IMPORT_ERRORS = {}
+_PRIME_AGENT_INSTALLED_SKILLS = {}
 
-for _prime_agent_skill_name in ${JSON.stringify(importNames)}:
+for _prime_agent_skill_name, _prime_agent_canonical_name in ${JSON.stringify(skillNames)}.items():
     try:
         globals()[_prime_agent_skill_name] = _prime_agent_wrap_skill_module(
             _prime_agent_importlib.import_module(_prime_agent_skill_name)
         )
+        _PRIME_AGENT_INSTALLED_SKILLS[globals()[_prime_agent_skill_name]] = _prime_agent_canonical_name
     except Exception as _prime_agent_skill_error:
         _PRIME_AGENT_SKILL_IMPORT_ERRORS[_prime_agent_skill_name] = str(_prime_agent_skill_error)
         globals()[_prime_agent_skill_name] = _PrimeAgentUnavailableSkill(
